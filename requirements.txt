@@ -1,0 +1,16 @@
+# OREMalPkgInspector Dependencies
+
+# YAML parsing for configuration
+PyYAML>=6.0,<7.0
+
+# HTTP requests for collectors
+requests>=2.31.0
+
+# Web scraping for Phylum collector
+beautifulsoup4>=4.12.0
+
+# Version parsing and comparison
+packaging>=21.0
+
+# Optional: Enhanced error handling
+# jsonschema>=4.0,<5.0

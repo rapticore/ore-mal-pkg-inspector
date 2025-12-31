@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Collectors cache and data
+collectors/.cache/
+collectors/raw-data/
+collectors/final-data/
+.cache/
+raw-data/
+final-data/
+
+# Scan outputs
+scan-output/
+logs/
+
+# Environment
+.env
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

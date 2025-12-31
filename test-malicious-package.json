@@ -1,0 +1,12 @@
+{
+  "name": "test-scan-project",
+  "version": "1.0.0",
+  "description": "Test project with known malicious packages for scanner testing",
+  "dependencies": {
+    "--hiljson": "1.0.0",
+    "-d3-ushape": "1.0.0",
+    "-gzip-ize": "1.0.0",
+    "--legacy-peer-deps": "1.0.0",
+    "--no-audit": "1.0.0"
+  }
+}

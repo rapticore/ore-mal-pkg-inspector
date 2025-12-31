@@ -1,0 +1,33 @@
+{
+  "name": "oremalpkginspector",
+  "version": "1.0.0",
+  "description": "Multi-ecosystem malicious package scanner supporting npm, PyPI, Maven, RubyGems, Go, and Cargo",
+  "main": "malicious_package_scanner.py",
+  "scripts": {
+    "collect": "cd collectors && ./run_all.sh",
+    "scan": "python3 malicious_package_scanner.py"
+  },
+  "keywords": [
+    "security",
+    "malicious-packages",
+    "vulnerability-scanner",
+    "npm",
+    "pypi",
+    "maven",
+    "rubygems",
+    "golang",
+    "cargo",
+    "supply-chain-security",
+    "threat-intelligence"
+  ],
+  "author": "Rapticore Security Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rapticore/OREMalPkgInspector.git"
+  },
+  "homepage": "https://github.com/rapticore/OREMalPkgInspector#readme",
+  "bugs": {
+    "url": "https://github.com/rapticore/OREMalPkgInspector/issues"
+  }
+}
