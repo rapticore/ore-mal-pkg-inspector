@@ -2,7 +2,7 @@
 Multi-Ecosystem Malicious Package Scanner Modules
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 # Export main modules
 from scanners import ecosystem_detector
@@ -20,4 +20,3 @@ __all__ = [
     'report_generator',
     'ioc_detector',
 ]
-

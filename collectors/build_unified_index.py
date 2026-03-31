@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 """
-
-# Module logger
-logger = logging.getLogger(__name__)
-
 Unified Index Builder
 Merges raw data from all sources into ecosystem-specific unified files
 """
@@ -11,6 +7,9 @@ Merges raw data from all sources into ecosystem-specific unified files
 import os
 import sys
 import logging
+
+# Module logger
+logger = logging.getLogger(__name__)
 from collections import defaultdict
 
 # Add current directory to path for imports
@@ -20,7 +19,7 @@ import utils
 import db
 
 
-def load_all_raw_data():
+def load_all_raw_data(source_names=None):
     """
     Load all raw data files from raw-data directory
 
@@ -28,7 +27,10 @@ def load_all_raw_data():
         list: List of data dictionaries from all sources
     """
     raw_data_dir = os.path.join(os.path.dirname(__file__), 'raw-data')
-    raw_files = ['openssf.json', 'socketdev.json', 'osv.json', 'phylum.json']
+    if source_names:
+        raw_files = [f'{source}.json' for source in source_names]
+    else:
+        raw_files = ['openssf.json', 'socketdev.json', 'osv.json', 'phylum.json']
 
     all_data = []
 
@@ -183,7 +185,7 @@ def merge_packages_by_ecosystem(raw_data_list):
     return result
 
 
-def build_unified_database(ecosystem, packages):
+def build_unified_database(ecosystem, packages, metadata=None, timestamp=None):
     """
     Build SQLite database for a specific ecosystem.
 
@@ -208,7 +210,13 @@ def build_unified_database(ecosystem, packages):
         conn, temp_path = db.create_database(output_path)
 
         # Insert metadata
-        db.insert_metadata(conn, ecosystem, packages, utils.get_timestamp())
+        db.insert_metadata(
+            conn,
+            ecosystem,
+            packages,
+            timestamp or utils.get_timestamp(),
+            extra_metadata=metadata,
+        )
 
         # Insert packages
         db.insert_packages(conn, packages)

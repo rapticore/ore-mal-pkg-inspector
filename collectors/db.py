@@ -122,8 +122,13 @@ def finalize_database(conn: sqlite3.Connection, temp_path: str, final_path: str)
     os.replace(temp_path, final_path)
 
 
-def insert_metadata(conn: sqlite3.Connection, ecosystem: str,
-                   packages: List[Dict], timestamp: str):
+def insert_metadata(
+    conn: sqlite3.Connection,
+    ecosystem: str,
+    packages: List[Dict],
+    timestamp: str,
+    extra_metadata: Optional[Dict[str, Any]] = None,
+):
     """
     Insert database metadata.
 
@@ -138,13 +143,30 @@ def insert_metadata(conn: sqlite3.Connection, ecosystem: str,
     for pkg in packages:
         all_sources.update(pkg.get('sources', []))
 
+    extra_metadata = extra_metadata or {}
+    sources_used = extra_metadata.get('sources_used', sorted(list(all_sources)))
+    experimental_sources_used = extra_metadata.get('experimental_sources_used', [])
+
     metadata = [
         ('ecosystem', ecosystem),
         ('last_updated', timestamp),
         ('total_packages', str(len(packages))),
         ('total_versions', str(total_versions)),
-        ('sources', json.dumps(sorted(list(all_sources))))
+        ('sources', json.dumps(sorted(list(all_sources)))),
+        ('sources_used', json.dumps(sources_used)),
+        ('experimental_sources_used', json.dumps(experimental_sources_used))
     ]
+
+    for key, value in extra_metadata.items():
+        if key in {'sources', 'sources_used', 'experimental_sources_used'}:
+            continue
+        if isinstance(value, (list, dict)):
+            value = json.dumps(value)
+        elif value is None:
+            value = ''
+        else:
+            value = str(value)
+        metadata.append((key, value))
 
     conn.executemany('INSERT INTO metadata (key, value) VALUES (?, ?)', metadata)
     conn.commit()
@@ -608,7 +630,7 @@ def get_metadata(conn: sqlite3.Connection) -> Dict[str, Any]:
     for row in cursor.fetchall():
         key, value = row[0], row[1]
         # Parse JSON for sources
-        if key == 'sources':
+        if key in ('sources', 'sources_used', 'experimental_sources_used', 'failed_sources'):
             metadata[key] = json.loads(value)
         elif key in ('total_packages', 'total_versions'):
             metadata[key] = int(value)

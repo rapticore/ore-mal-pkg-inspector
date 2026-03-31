@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """
-
-# Module logger
-logger = logging.getLogger(__name__)
-
-OSV.dev Collector
-Fetches malicious package data from OSV.dev bulk downloads
-Downloads vulnerability data and filters for MAL- prefixed entries (malware)
+OSV.dev Collector.
+Fetches malicious package data from OSV.dev bulk downloads.
+Downloads vulnerability data and filters for MAL- prefixed entries (malware).
 Source: https://osv-vulnerabilities.storage.googleapis.com/{ecosystem}/all.zip
 """
 
@@ -23,6 +19,9 @@ from urllib.error import URLError
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import utils
+
+
+logger = logging.getLogger(__name__)
 
 
 # OSV bulk download base URL

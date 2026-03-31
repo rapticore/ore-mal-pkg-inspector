@@ -1,36 +1,11 @@
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.so
-*.egg
-*.egg-info/
-dist/
-build/
-.venv/
-venv/
-
-# Collectors cache and data
+.ore-monitor/
+scan-output/
 collectors/.cache/
 collectors/raw-data/
 collectors/final-data/
-.cache/
-raw-data/
-final-data/
-
-# Scan outputs
-scan-output/
-logs/
-
-# Environment
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
 .env
-.DS_Store
-
-# IDEs
-.idea/
-.vscode/
-*.swp
-*.swo
-*~

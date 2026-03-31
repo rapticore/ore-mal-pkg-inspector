@@ -203,6 +203,7 @@ class MaliciousPackageChecker:
                     result = {
                         'name': pkg_name,
                         'version': pkg_version or matched_version,
+                        'ecosystem': 'npm',
                         'matched_version': matched_version,
                         'severity': 'critical',
                         'sources': ['shai-hulud'],
@@ -288,6 +289,7 @@ class MaliciousPackageChecker:
                 # Use db.check_package for lookup
                 result = db.check_package(conn, pkg_name, pkg_version)
                 if result:
+                    result['ecosystem'] = ecosystem
                     # Preserve SARIF locations from input package
                     if 'locations' in pkg:
                         result['locations'] = pkg['locations']
@@ -327,4 +329,3 @@ def check_malicious_packages(packages: List[Dict[str, str]], ecosystem: str,
     """
     checker = MaliciousPackageChecker(collectors_dir)
     return checker.check_packages(packages, ecosystem, include_shai_hulud=include_shai_hulud)
-

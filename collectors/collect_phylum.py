@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-
-# Module logger
-logger = logging.getLogger(__name__)
-
-Phylum.io Blog Collector
-Scrapes malicious package reports from Phylum's research blog
+Phylum.io Blog Collector.
+Scrapes malicious package reports from Phylum's research blog.
 """
 
 import os
@@ -18,6 +14,9 @@ import re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import utils
+
+
+logger = logging.getLogger(__name__)
 
 
 def load_config():

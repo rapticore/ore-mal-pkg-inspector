@@ -5,37 +5,14 @@ Detects package ecosystems from directory structure or file names
 """
 
 import os
-from pathlib import Path
-from typing import Optional, List, Set, Tuple
+from typing import Optional, List, Set
 
-
-# Mapping of file names to ecosystems
-FILENAME_TO_ECOSYSTEM = {
-    # npm
-    'package.json': 'npm',
-    'package-lock.json': 'npm',
-    'yarn.lock': 'npm',
-    'pnpm-lock.yaml': 'npm',
-    # pypi
-    'requirements.txt': 'pypi',
-    'setup.py': 'pypi',
-    'pyproject.toml': 'pypi',
-    'Pipfile': 'pypi',
-    'poetry.lock': 'pypi',
-    # maven
-    'pom.xml': 'maven',
-    'build.gradle': 'maven',
-    # rubygems
-    'Gemfile': 'rubygems',
-    'Gemfile.lock': 'rubygems',
-    # go
-    'go.mod': 'go',
-    'go.sum': 'go',
-    # cargo
-    'Cargo.toml': 'cargo',
-    'Cargo.lock': 'cargo',
-}
-
+from scanners.supported_files import (
+    ECOSYSTEM_PRIORITY,
+    FILENAME_TO_ECOSYSTEM,
+    SKIP_DIRS,
+    get_supported_files_for_ecosystem,
+)
 
 def detect_ecosystem_from_filename(filepath: str) -> Optional[str]:
     """
@@ -95,17 +72,9 @@ def detect_ecosystem_from_directory(directory: str) -> Optional[str]:
     
     found_ecosystems: Set[str] = set()
     
-    # Skip common directories (build artifacts, caches, dependencies)
-    skip_dirs = [
-        'node_modules', '.git', '__pycache__', 'venv', 'env', '.venv',
-        '.next', 'build', 'dist', '.build', 'target', 'out', '.cache',
-        '.idea', '.vscode', '.vs', 'coverage', '.nyc_output', '.pytest_cache',
-        'bin', 'obj', '.gradle', '.mvn', 'vendor', 'bower_components'
-    ]
-    
     # Scan for ecosystem-specific files
     for root, dirs, files in os.walk(directory):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         
         for filename in files:
             ecosystem = FILENAME_TO_ECOSYSTEM.get(filename)
@@ -114,9 +83,7 @@ def detect_ecosystem_from_directory(directory: str) -> Optional[str]:
     
     # Return ecosystem if found
     if found_ecosystems:
-        # Priority order: npm, pypi, maven, rubygems, go, cargo
-        priority_order = ['npm', 'pypi', 'maven', 'rubygems', 'go', 'cargo']
-        for eco in priority_order:
+        for eco in ECOSYSTEM_PRIORITY:
             if eco in found_ecosystems:
                 return eco
         # If not in priority list, return first one
@@ -140,17 +107,9 @@ def detect_all_ecosystems_from_directory(directory: str) -> List[str]:
     
     found_ecosystems: Set[str] = set()
     
-    # Skip common directories (build artifacts, caches, dependencies)
-    skip_dirs = [
-        'node_modules', '.git', '__pycache__', 'venv', 'env', '.venv',
-        '.next', 'build', 'dist', '.build', 'target', 'out', '.cache',
-        '.idea', '.vscode', '.vs', 'coverage', '.nyc_output', '.pytest_cache',
-        'bin', 'obj', '.gradle', '.mvn', 'vendor', 'bower_components'
-    ]
-    
     # Scan for ecosystem-specific files
     for root, dirs, files in os.walk(directory):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         
         for filename in files:
             ecosystem = FILENAME_TO_ECOSYSTEM.get(filename)
@@ -158,9 +117,8 @@ def detect_all_ecosystems_from_directory(directory: str) -> List[str]:
                 found_ecosystems.add(ecosystem)
     
     # Return in priority order
-    priority_order = ['npm', 'pypi', 'maven', 'rubygems', 'go', 'cargo']
     result = []
-    for eco in priority_order:
+    for eco in ECOSYSTEM_PRIORITY:
         if eco in found_ecosystems:
             result.append(eco)
     
@@ -186,32 +144,14 @@ def find_dependency_files(directory: str, ecosystem: str) -> List[str]:
     if not os.path.isdir(directory):
         return []
     
-    # Map ecosystem to its dependency files
-    ecosystem_files = {
-        'npm': ['package.json', 'package-lock.json'],
-        'pypi': ['requirements.txt', 'setup.py', 'pyproject.toml', 'Pipfile'],
-        'maven': ['pom.xml', 'build.gradle'],
-        'rubygems': ['Gemfile', 'Gemfile.lock'],
-        'go': ['go.mod', 'go.sum'],
-        'cargo': ['Cargo.toml', 'Cargo.lock'],
-    }
-    
-    target_files = ecosystem_files.get(ecosystem, [])
+    target_files = get_supported_files_for_ecosystem(ecosystem)
     found_files = []
     
     for root, dirs, files in os.walk(directory):
-        # Skip common directories (build artifacts, caches, dependencies)
-        skip_dirs = [
-            'node_modules', '.git', '__pycache__', 'venv', 'env', '.venv',
-            '.next', 'build', 'dist', '.build', 'target', 'out', '.cache',
-            '.idea', '.vscode', '.vs', 'coverage', '.nyc_output', '.pytest_cache',
-            'bin', 'obj', '.gradle', '.mvn', 'vendor', 'bower_components'
-        ]
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         
         for filename in files:
             if filename in target_files:
                 found_files.append(os.path.join(root, filename))
     
     return found_files
-

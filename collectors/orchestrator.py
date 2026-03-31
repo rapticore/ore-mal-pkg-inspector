@@ -7,7 +7,7 @@ Programmatically runs all collectors and builds unified databases
 import os
 import sys
 import logging
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 
 # Add current directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,9 +23,89 @@ import collect_osv
 import collect_phylum
 import collect_socketdev
 import build_unified_index
+import db
 
 # Module logger
 logger = logging.getLogger(__name__)
+MINIMUM_PYTHON = (3, 14)
+
+
+def ensure_supported_python() -> None:
+    """Fail fast when the collector pipeline is run on an unsupported Python."""
+    if sys.version_info < MINIMUM_PYTHON:
+        version = ".".join(str(part) for part in MINIMUM_PYTHON)
+        raise SystemExit(
+            f"Collector pipeline requires Python {version}+; "
+            f"found {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        )
+
+
+EXPECTED_ECOSYSTEMS = ['npm', 'pypi', 'rubygems', 'go', 'maven', 'cargo']
+REQUIRED_METADATA_KEYS = {
+    'data_status',
+    'sources_used',
+    'experimental_sources_used',
+    'last_successful_collect',
+}
+
+SOURCE_DEFINITIONS = {
+    'openssf': {
+        'name': 'OpenSSF Malicious Packages',
+        'func': collect_openssf.fetch_openssf_packages,
+        'output': 'openssf.json',
+        'tier': 'core',
+        'ecosystems': EXPECTED_ECOSYSTEMS,
+        'enabled_by_default': True,
+    },
+    'osv': {
+        'name': 'OSV.dev',
+        'func': collect_osv.fetch_osv_packages,
+        'output': 'osv.json',
+        'tier': 'core',
+        'ecosystems': EXPECTED_ECOSYSTEMS,
+        'enabled_by_default': True,
+    },
+    'phylum': {
+        'name': 'Phylum.io Blog',
+        'func': collect_phylum.fetch_phylum_packages,
+        'output': 'phylum.json',
+        'tier': 'experimental',
+        'ecosystems': ['npm', 'pypi'],
+        'enabled_by_default': False,
+    },
+    'socketdev': {
+        'name': 'Socket.dev',
+        'func': collect_socketdev.fetch_socketdev_packages,
+        'output': 'socketdev.json',
+        'tier': 'disabled',
+        'ecosystems': ['npm'],
+        'enabled_by_default': False,
+    },
+}
+
+
+def resolve_sources(
+    sources: Optional[List[str]] = None,
+    include_experimental: bool = False,
+) -> List[str]:
+    """Resolve the selected source list in stable definition order."""
+    if sources:
+        return [name for name in SOURCE_DEFINITIONS if name in sources]
+
+    selected = [
+        name
+        for name, config in SOURCE_DEFINITIONS.items()
+        if config.get('enabled_by_default')
+    ]
+
+    if include_experimental:
+        selected.extend(
+            name
+            for name, config in SOURCE_DEFINITIONS.items()
+            if config.get('tier') == 'experimental' and name not in selected
+        )
+
+    return selected
 
 
 def _get_directories():
@@ -46,23 +126,36 @@ def _get_directories():
     return raw_data_dir, final_data_dir
 
 
-def run_collector(name: str, fetch_func, output_filename: str) -> bool:
+def run_collector(source_key: str, collector_config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Run a single collector and save its data.
     
     Args:
-        name: Display name of the collector
-        fetch_func: Function to call to fetch data
-        output_filename: Filename to save data to (in raw-data/)
+        source_key: Source identifier
+        collector_config: Collector configuration from SOURCE_DEFINITIONS
         
     Returns:
-        True if successful, False otherwise
+        Dict describing the collector result
     """
+    name = collector_config['name']
+    fetch_func = collector_config['func']
+    output_filename = collector_config['output']
     logger.info("\n%s", '='*60)
     print(f"Running {name}")
     print('='*60)
     
     raw_data_dir, _ = _get_directories()
+    output_path = os.path.join(raw_data_dir, output_filename)
+    result = {
+        'source': source_key,
+        'name': name,
+        'tier': collector_config['tier'],
+        'ecosystems': collector_config['ecosystems'],
+        'output': output_filename,
+        'success': False,
+        'package_count': 0,
+        'error': '',
+    }
     
     try:
         # Call the fetch function
@@ -71,43 +164,53 @@ def run_collector(name: str, fetch_func, output_filename: str) -> bool:
         if not data:
             logger.warning("⚠ %s returned no data", name)
             # Save empty result
-            output_path = os.path.join(raw_data_dir, output_filename)
             utils.save_json({
-                "source": output_filename.replace('.json', ''),
+                "source": source_key,
+                "source_tier": collector_config['tier'],
                 "collected_at": utils.get_timestamp(),
                 "total_packages": 0,
                 "ecosystems": [],
                 "packages": [],
                 "error": "No data returned"
             }, output_path)
-            return False
+            result['error'] = 'No data returned'
+            return result
+
+        data.setdefault('source', source_key)
+        data.setdefault('source_tier', collector_config['tier'])
         
         # Save to raw-data
-        output_path = os.path.join(raw_data_dir, output_filename)
         if utils.save_json(data, output_path):
             package_count = data.get('total_packages', 0)
             logger.info("✓ %s completed: %s packages", name, package_count)
-            return True
+            result['success'] = True
+            result['package_count'] = package_count
+            return result
         else:
             logger.error("✗ %s failed to save data", name)
-            return False
+            result['error'] = 'Failed to save data'
+            return result
             
     except Exception as e:
         logger.error("✗ %s failed with error: %s", name, e)
         # Save error result
-        output_path = os.path.join(raw_data_dir, output_filename)
         utils.save_json({
-            "source": output_filename.replace('.json', ''),
+            "source": source_key,
+            "source_tier": collector_config['tier'],
             "collected_at": utils.get_timestamp(),
             "total_packages": 0,
             "ecosystems": [],
             "packages": [],
             "error": str(e)
         }, output_path)
-        return False
+        result['error'] = str(e)
+        return result
 
 
-def run_all_collectors(sources: Optional[List[str]] = None) -> Dict[str, bool]:
+def run_all_collectors(
+    sources: Optional[List[str]] = None,
+    include_experimental: bool = False,
+) -> Dict[str, Dict[str, Any]]:
     """
     Run all or selected collectors.
     
@@ -117,88 +220,193 @@ def run_all_collectors(sources: Optional[List[str]] = None) -> Dict[str, bool]:
                 If None, runs all collectors.
     
     Returns:
-        Dict mapping source name to success status
+        Dict mapping source name to result dict
     """
-    # Define all available collectors
-    all_collectors = {
-        'openssf': {
-            'name': 'OpenSSF Malicious Packages',
-            'func': collect_openssf.fetch_openssf_packages,
-            'output': 'openssf.json'
-        },
-        'osv': {
-            'name': 'OSV.dev',
-            'func': collect_osv.fetch_osv_packages,
-            'output': 'osv.json'
-        },
-        'phylum': {
-            'name': 'Phylum.io Blog',
-            'func': collect_phylum.fetch_phylum_packages,
-            'output': 'phylum.json'
-        },
-        'socketdev': {
-            'name': 'Socket.dev',
-            'func': collect_socketdev.fetch_socketdev_packages,
-            'output': 'socketdev.json'
-        }
-    }
-    
-    # Filter collectors if sources specified
-    if sources:
-        collectors = {k: v for k, v in all_collectors.items() if k in sources}
-    else:
-        collectors = all_collectors
+    selected_sources = resolve_sources(sources, include_experimental=include_experimental)
     
     # Run each collector
     results = {}
-    for source_key, collector in collectors.items():
-        success = run_collector(
-            collector['name'],
-            collector['func'],
-            collector['output']
-        )
-        results[source_key] = success
+    for source_key in selected_sources:
+        collector = SOURCE_DEFINITIONS[source_key]
+        results[source_key] = run_collector(source_key, collector)
     
     return results
 
 
 def check_databases_exist() -> bool:
     """
-    Check if any SQLite database files exist.
+    Check if all expected SQLite database files exist.
     
     Returns:
-        True if at least one database file exists, False otherwise
+        True if all database files exist, False otherwise
     """
     _, final_data_dir = _get_directories()
     ecosystems = ['npm', 'pypi', 'rubygems', 'go', 'maven', 'cargo']
     
-    for ecosystem in ecosystems:
+    return all(
+        os.path.exists(os.path.join(final_data_dir, f'unified_{ecosystem}.db'))
+        for ecosystem in ecosystems
+    )
+
+
+def get_database_statuses(ecosystems: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+    """
+    Inspect database files and return per-ecosystem availability metadata.
+
+    Args:
+        ecosystems: Optional list of ecosystems to inspect
+
+    Returns:
+        Mapping of ecosystem to status dict
+    """
+    _, final_data_dir = _get_directories()
+    target_ecosystems = ecosystems or EXPECTED_ECOSYSTEMS
+    statuses: Dict[str, Dict[str, Any]] = {}
+
+    for ecosystem in target_ecosystems:
         db_path = os.path.join(final_data_dir, f'unified_{ecosystem}.db')
-        if os.path.exists(db_path):
-            return True
-    
-    return False
+        status: Dict[str, Any] = {
+            'exists': os.path.exists(db_path),
+            'usable': False,
+            'data_status': 'failed',
+            'sources_used': [],
+            'experimental_sources_used': [],
+            'last_successful_collect': '',
+            'metadata_ready': False,
+        }
+
+        if not status['exists']:
+            statuses[ecosystem] = status
+            continue
+
+        conn = db.open_database(db_path)
+        if not conn:
+            status['error'] = 'Could not open database'
+            statuses[ecosystem] = status
+            continue
+
+        try:
+            metadata = db.get_metadata(conn)
+        finally:
+            conn.close()
+
+        data_status = metadata.get('data_status', 'failed')
+        status.update({
+            'data_status': data_status,
+            'sources_used': metadata.get('sources_used', metadata.get('sources', [])),
+            'experimental_sources_used': metadata.get('experimental_sources_used', []),
+            'last_successful_collect': metadata.get('last_successful_collect', ''),
+            'total_packages': metadata.get('total_packages', 0),
+            'metadata_ready': REQUIRED_METADATA_KEYS.issubset(metadata.keys()),
+        })
+        status['usable'] = data_status in {'complete', 'partial'}
+        statuses[ecosystem] = status
+
+    return statuses
 
 
-def build_databases() -> bool:
+def databases_need_refresh(include_experimental: bool = False) -> bool:
+    """
+    Determine whether databases should be rebuilt for the requested source tier set.
+
+    Args:
+        include_experimental: Whether experimental sources are required
+
+    Returns:
+        True when databases are missing, lack metadata, or reflect the wrong source tier set
+    """
+    statuses = get_database_statuses()
+    if not all(status['exists'] for status in statuses.values()):
+        return True
+
+    if not all(status['metadata_ready'] for status in statuses.values()):
+        return True
+
+    if any(status['data_status'] == 'failed' for status in statuses.values()):
+        return True
+
+    if include_experimental:
+        return any(not status['experimental_sources_used'] for status in statuses.values())
+
+    return any(status['experimental_sources_used'] for status in statuses.values())
+
+
+def _calculate_ecosystem_metadata(
+    ecosystem: str,
+    selected_sources: List[str],
+    source_results: Dict[str, Dict[str, Any]],
+    timestamp: str,
+) -> Dict[str, Any]:
+    """Calculate per-ecosystem metadata from selected source results."""
+    relevant_sources = [
+        source
+        for source in selected_sources
+        if ecosystem in SOURCE_DEFINITIONS[source]['ecosystems']
+    ]
+    successful_sources = [
+        source for source in relevant_sources if source_results.get(source, {}).get('success')
+    ]
+    core_sources = [
+        source for source in relevant_sources if SOURCE_DEFINITIONS[source]['tier'] == 'core'
+    ]
+    successful_core_sources = [
+        source for source in core_sources if source_results.get(source, {}).get('success')
+    ]
+    experimental_sources = [
+        source for source in successful_sources
+        if SOURCE_DEFINITIONS[source]['tier'] == 'experimental'
+    ]
+    failed_sources = [
+        source for source in relevant_sources if not source_results.get(source, {}).get('success')
+    ]
+
+    if not successful_sources:
+        data_status = 'failed'
+    elif not core_sources:
+        data_status = 'partial'
+    elif len(successful_core_sources) == len(core_sources):
+        data_status = 'complete'
+    else:
+        data_status = 'partial'
+
+    return {
+        'data_status': data_status,
+        'sources_used': successful_sources,
+        'experimental_sources_used': experimental_sources,
+        'failed_sources': failed_sources,
+        'last_successful_collect': timestamp if successful_sources else '',
+    }
+
+
+def build_databases(
+    selected_sources: Optional[List[str]] = None,
+    source_results: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     """
     Build unified SQLite databases from raw data.
     
     Returns:
-        True if successful, False otherwise
+        Summary dict describing build and database status
     """
     logger.info("\n%s", '='*60)
     logger.info("Building Unified SQLite Databases")
     print('='*60)
+    selected_sources = selected_sources or resolve_sources()
+    source_results = source_results or {}
+    timestamp = utils.get_timestamp()
     
     try:
         # Load all raw data
         print("\nLoading raw data files...")
-        raw_data_list = build_unified_index.load_all_raw_data()
+        raw_data_list = build_unified_index.load_all_raw_data(selected_sources)
         
         if not raw_data_list:
             print("⚠ No raw data files found")
-            return False
+            return {
+                'success': False,
+                'database_statuses': get_database_statuses(),
+                'build_results': {},
+            }
         
         logger.info("Loaded data from %s sources", len(raw_data_list))
         
@@ -206,47 +414,59 @@ def build_databases() -> bool:
         logger.info("\nMerging packages by ecosystem...")
         ecosystem_data = build_unified_index.merge_packages_by_ecosystem(raw_data_list)
         
-        if not ecosystem_data:
-            print("⚠ No packages found to merge")
-            # Create empty databases
-            for ecosystem in ['npm', 'pypi', 'rubygems', 'go', 'maven', 'cargo']:
-                build_unified_index.build_unified_database(ecosystem, [])
-            logger.info("Created empty databases")
-            return True
-        
         logger.info("Found packages in %s ecosystems", len(ecosystem_data))
         
         # Build databases
         print("\nBuilding SQLite databases...")
         total_packages = 0
-        success = True
-        
-        for ecosystem, packages in ecosystem_data.items():
-            if build_unified_index.build_unified_database(ecosystem, packages):
-                logger.info("✓ %s: %s packages", ecosystem, len(packages))
+        build_results = {}
+
+        for ecosystem in EXPECTED_ECOSYSTEMS:
+            packages = ecosystem_data.get(ecosystem, [])
+            metadata = _calculate_ecosystem_metadata(
+                ecosystem,
+                selected_sources,
+                source_results,
+                timestamp,
+            )
+            build_success = build_unified_index.build_unified_database(
+                ecosystem,
+                packages,
+                metadata=metadata,
+                timestamp=timestamp,
+            )
+            build_results[ecosystem] = build_success
+            if build_success:
+                logger.info("✓ %s: %s packages [%s]", ecosystem, len(packages), metadata['data_status'])
                 total_packages += len(packages)
             else:
                 logger.info("✗ %s: Failed to build", ecosystem)
-                success = False
-        
-        # Create empty databases for ecosystems with no data
-        all_ecosystems = ['npm', 'pypi', 'rubygems', 'go', 'maven', 'cargo']
-        for ecosystem in all_ecosystems:
-            if ecosystem not in ecosystem_data:
-                build_unified_index.build_unified_database(ecosystem, [])
-                logger.info("✓ %s: 0 packages (empty)", ecosystem)
-        
+
         logger.info("\n✓ Built databases with %s total packages", total_packages)
-        return success
+        database_statuses = get_database_statuses()
+        return {
+            'success': all(build_results.values()),
+            'database_statuses': database_statuses,
+            'build_results': build_results,
+        }
         
     except Exception as e:
         print(f"\n✗ Database build failed: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        return {
+            'success': False,
+            'database_statuses': get_database_statuses(),
+            'build_results': {},
+        }
 
 
-def collect_all_data(sources: Optional[List[str]] = None, skip_build: bool = False, build_if_missing: bool = False) -> bool:
+def collect_all_data(
+    sources: Optional[List[str]] = None,
+    skip_build: bool = False,
+    build_if_missing: bool = False,
+    include_experimental: bool = False,
+) -> Dict[str, Any]:
     """
     Main function to collect data from all sources and build unified databases.
     
@@ -263,22 +483,49 @@ def collect_all_data(sources: Optional[List[str]] = None, skip_build: bool = Fal
                          Takes precedence over skip_build.
     
     Returns:
-        True if successful, False otherwise
+        Summary dict describing source results and database status
     """
     logger.info("="*60)
     print("OreNPMGuard Malicious Package Collector")
     print("="*60)
+    selected_sources = resolve_sources(sources, include_experimental=include_experimental)
+
+    if build_if_missing and not databases_need_refresh(include_experimental=include_experimental):
+        logger.info("\nDatabases already exist (build_if_missing=True)")
+        print("Skipping collection and database build")
+        database_statuses = get_database_statuses()
+        complete_ecosystems = [
+            eco for eco, status in database_statuses.items()
+            if status.get('data_status') == 'complete'
+        ]
+        partial_ecosystems = [
+            eco for eco, status in database_statuses.items()
+            if status.get('data_status') == 'partial'
+        ]
+        failed_ecosystems = [
+            eco for eco, status in database_statuses.items()
+            if status.get('data_status') == 'failed'
+        ]
+        return {
+            'success': any(status.get('usable') for status in database_statuses.values()),
+            'selected_sources': selected_sources,
+            'source_results': {},
+            'database_statuses': database_statuses,
+            'complete_ecosystems': complete_ecosystems,
+            'partial_ecosystems': partial_ecosystems,
+            'failed_ecosystems': failed_ecosystems,
+        }
     
     # Run collectors
-    collector_results = run_all_collectors(sources)
+    collector_results = run_all_collectors(sources, include_experimental=include_experimental)
     
     # Print collector summary
     logger.info("\n%s", '='*60)
     print("Collector Summary")
     print('='*60)
     
-    successful = [k for k, v in collector_results.items() if v]
-    failed = [k for k, v in collector_results.items() if not v]
+    successful = [k for k, v in collector_results.items() if v.get('success')]
+    failed = [k for k, v in collector_results.items() if not v.get('success')]
     
     if successful:
         logger.info("✓ Successful: %s", ', '.join(successful))
@@ -287,43 +534,72 @@ def collect_all_data(sources: Optional[List[str]] = None, skip_build: bool = Fal
     
     # Build databases (conditional logic)
     if build_if_missing:
-        # Only build if databases don't exist
-        if check_databases_exist():
-            logger.info("\nDatabases already exist (build_if_missing=True)")
-            print("Skipping database build")
-            db_success = True
-        else:
-            print("\nDatabases not found (build_if_missing=True)")
-            print("Building databases...")
-            db_success = build_databases()
+        print("\nDatabases missing or outdated (build_if_missing=True)")
+        print("Building databases...")
+        build_summary = build_databases(selected_sources, collector_results)
     elif not skip_build:
         # Always build (default behavior)
-        db_success = build_databases()
+        build_summary = build_databases(selected_sources, collector_results)
     else:
         # Never build (skip_build=True)
         print("\nSkipping database build (skip_build=True)")
-        db_success = True
+        build_summary = {
+            'success': True,
+            'database_statuses': get_database_statuses(),
+            'build_results': {},
+        }
+
+    database_statuses = build_summary['database_statuses']
+    usable_ecosystems = [
+        eco for eco, status in database_statuses.items() if status.get('usable')
+    ]
+    complete_ecosystems = [
+        eco for eco, status in database_statuses.items()
+        if status.get('data_status') == 'complete'
+    ]
+    partial_ecosystems = [
+        eco for eco, status in database_statuses.items()
+        if status.get('data_status') == 'partial'
+    ]
+    failed_ecosystems = [
+        eco for eco, status in database_statuses.items()
+        if status.get('data_status') == 'failed'
+    ]
+    overall_success = bool(usable_ecosystems)
     
     # Final summary
     logger.info("\n%s", '='*60)
-    if successful and db_success:
+    if overall_success:
         print("✓ Collection Complete!")
         print(f"Raw data: collectors/raw-data/")
         print(f"Databases: collectors/final-data/*.db")
+        if partial_ecosystems:
+            print(f"Partial data ecosystems: {', '.join(partial_ecosystems)}")
+        if failed_ecosystems:
+            print(f"Unavailable ecosystems: {', '.join(failed_ecosystems)}")
     else:
         print("⚠ Collection completed with some errors")
         if not successful:
             logger.info("Failed collectors: %s", ', '.join(failed))
-        if not db_success and not skip_build:
+        if not build_summary['success'] and not skip_build:
             logger.info("  Database build failed")
     print('='*60)
     
-    return bool(successful) and db_success
+    return {
+        'success': overall_success,
+        'selected_sources': selected_sources,
+        'source_results': collector_results,
+        'database_statuses': database_statuses,
+        'complete_ecosystems': complete_ecosystems,
+        'partial_ecosystems': partial_ecosystems,
+        'failed_ecosystems': failed_ecosystems,
+    }
 
 
 def main():
     """Command-line entry point."""
     import argparse
+    ensure_supported_python()
 
     parser = argparse.ArgumentParser(
         description='Collect malicious package data from all sources'
@@ -331,7 +607,7 @@ def main():
     parser.add_argument(
         '--sources',
         nargs='+',
-        choices=['openssf', 'osv', 'phylum', 'socketdev'],
+        choices=list(SOURCE_DEFINITIONS.keys()),
         help='Specific sources to collect from (default: all)'
     )
     parser.add_argument(
@@ -343,6 +619,11 @@ def main():
         '--build-if-missing',
         action='store_true',
         help='Only build databases if they do not exist'
+    )
+    parser.add_argument(
+        '--include-experimental',
+        action='store_true',
+        help='Include experimental collectors in the default source set'
     )
     parser.add_argument(
         '--verbose', '-v',
@@ -365,12 +646,13 @@ def main():
     else:
         setup_logging(logging.WARNING)  # Default: only warnings and errors
     
-    success = collect_all_data(
+    summary = collect_all_data(
         sources=args.sources,
         skip_build=args.skip_build,
-        build_if_missing=args.build_if_missing
+        build_if_missing=args.build_if_missing,
+        include_experimental=args.include_experimental,
     )
-    sys.exit(0 if success else 1)
+    sys.exit(0 if summary.get('success') else 1)
 
 
 if __name__ == "__main__":

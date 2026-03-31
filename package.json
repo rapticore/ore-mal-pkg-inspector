@@ -1,11 +1,11 @@
 {
-  "name": "oremalpkginspector",
-  "version": "1.0.0",
-  "description": "Multi-ecosystem malicious package scanner supporting npm, PyPI, Maven, RubyGems, Go, and Cargo",
+  "name": "orewatch",
+  "version": "1.1.0",
+  "description": "OreWatch multi-ecosystem malicious package scanner and background monitor",
   "main": "malicious_package_scanner.py",
   "scripts": {
     "collect": "cd collectors && ./run_all.sh",
-    "scan": "python3 malicious_package_scanner.py"
+    "scan": "orewatch"
   },
   "keywords": [
     "security",

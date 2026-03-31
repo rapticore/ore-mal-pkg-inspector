@@ -18,6 +18,13 @@ if ! command -v python3 &> /dev/null; then
     exit 1
 fi
 
+# Require Python 3.14+
+if ! python3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 14) else 1)" 2>/dev/null; then
+    echo "Error: Python 3.14 or newer is required"
+    python3 --version 2>/dev/null || true
+    exit 1
+fi
+
 # Check if PyYAML is installed
 if ! python3 -c "import yaml" 2>/dev/null; then
     echo "Warning: PyYAML not found. Installing dependencies..."

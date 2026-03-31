@@ -45,7 +45,8 @@ def generate_report(
     total_packages_scanned: int,
     malicious_packages: List[Dict],
     iocs: Optional[List[Dict]] = None,
-    output_path: Optional[str] = None
+    output_path: Optional[str] = None,
+    data_metadata: Optional[Dict] = None,
 ) -> str:
     """
     Generate a JSON report for malicious packages found and IoCs detected.
@@ -57,12 +58,20 @@ def generate_report(
         malicious_packages: List of malicious packages found
         iocs: Optional list of IoCs (Indicators of Compromise) found
         output_path: Optional custom output path (full path). If None, saves to scan-output/ directory.
+        data_metadata: Optional threat-data availability metadata
         
     Returns:
         Path to the generated report file
     """
     if iocs is None:
         iocs = []
+    if data_metadata is None:
+        data_metadata = {
+            'data_status': 'not_applicable',
+            'sources_used': [],
+            'experimental_sources_used': [],
+            'missing_ecosystems': [],
+        }
 
     # Filter out source_details from malicious packages for the report
     filtered_packages = []
@@ -75,6 +84,10 @@ def generate_report(
         'ecosystem': ecosystem,
         'scanned_path': scanned_path,
         'total_packages_scanned': total_packages_scanned,
+        'data_status': data_metadata.get('data_status', 'not_applicable'),
+        'sources_used': data_metadata.get('sources_used', []),
+        'experimental_sources_used': data_metadata.get('experimental_sources_used', []),
+        'missing_ecosystems': data_metadata.get('missing_ecosystems', []),
         'malicious_packages_found': len(malicious_packages),
         'iocs_found': len(iocs),
         'malicious_packages': filtered_packages,
@@ -131,6 +144,15 @@ def print_report_summary(report_path: str):
     print(f"Scanned Path: {report.get('scanned_path', 'unknown')}")
     print(f"Scan Timestamp: {report.get('scan_timestamp', 'unknown')}")
     print(f"Total Packages Scanned: {report.get('total_packages_scanned', 0)}")
+    print(f"Threat Data Status: {report.get('data_status', 'unknown')}")
+    sources_used = report.get('sources_used', [])
+    print(f"Threat Sources Used: {', '.join(sources_used) if sources_used else 'none'}")
+    experimental_sources = report.get('experimental_sources_used', [])
+    if experimental_sources:
+        print(f"Experimental Sources Used: {', '.join(experimental_sources)}")
+    missing_ecosystems = report.get('missing_ecosystems', [])
+    if missing_ecosystems:
+        print(f"Unavailable Ecosystems: {', '.join(missing_ecosystems)}")
     print(f"Malicious Packages Found: {report.get('malicious_packages_found', 0)}")
     print(f"IoCs Found: {report.get('iocs_found', 0)}")
     print("=" * 60)
@@ -200,4 +222,3 @@ def print_report_summary(report_path: str):
     
     print(f"\nFull report saved to: {report_path}")
     print("=" * 60)
-

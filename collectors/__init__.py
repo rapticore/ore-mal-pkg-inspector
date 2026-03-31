@@ -1,0 +1,3 @@
+"""
+Collector package for OreWatch.
+"""

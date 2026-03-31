@@ -1,0 +1,5 @@
+[packages]
+requests = "==2.32.0"
+
+[dev-packages]
+pytest = "==8.3.3"

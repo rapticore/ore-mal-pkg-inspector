@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-
-# Module logger
-logger = logging.getLogger(__name__)
-
-Socket.dev Collector
-Fetches package risk data from Socket.dev API
+Socket.dev Collector.
+Fetches package risk data from Socket.dev API.
 """
 
 import os
@@ -17,6 +13,9 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import utils
+
+
+logger = logging.getLogger(__name__)
 
 
 def load_config():

@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-
-# Module logger
-logger = logging.getLogger(__name__)
-
-OpenSSF Malicious Packages Collector
-Fetches malicious package data from OpenSSF's malicious-packages repository
+OpenSSF Malicious Packages Collector.
+Fetches malicious package data from OpenSSF's malicious-packages repository.
 Repository: https://github.com/ossf/malicious-packages
 Structure: osv/malicious/{ecosystem}/{package_name}/MAL-*.json
 """
@@ -21,6 +17,9 @@ import shutil
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import utils
+
+
+logger = logging.getLogger(__name__)
 
 
 # Repository and cache settings

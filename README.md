@@ -1,13 +1,15 @@
-# ore-mal-pkg-inspector
+# OreWatch
 
 **Multi-Ecosystem Malicious Package Detection and Supply Chain Security Scanner**
 
-![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)
+![Python Version](https://img.shields.io/badge/python-3.14-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 ![Status](https://img.shields.io/badge/status-active-success.svg)
 ![Ecosystems](https://img.shields.io/badge/ecosystems-6-orange.svg)
 
 A production-grade security tool for detecting malicious packages and supply chain threats across npm, PyPI, Maven, RubyGems, Go, and Cargo ecosystems. Leverages automated threat intelligence collection from trusted security sources to identify compromised dependencies in your projects.
+
+`OreWatch` is the product and PyPI package name. The current source repository path still uses `ore-mal-pkg-inspector`.
 
 ---
 
@@ -16,7 +18,7 @@ A production-grade security tool for detecting malicious packages and supply cha
 - [The Problem](#the-problem)
 - [The Solution](#the-solution)
 - [Key Features](#key-features)
-- [Why ore-mal-pkg-inspector?](#why-ore-mal-pkg-inspector)
+- [Why OreWatch?](#why-orewatch)
 - [Quick Start](#quick-start)
   - [Prerequisites](#prerequisites)
   - [Installation](#installation)
@@ -25,6 +27,8 @@ A production-grade security tool for detecting malicious packages and supply cha
   - [Basic Commands](#basic-commands)
   - [Advanced Usage](#advanced-usage)
   - [Command-Line Reference](#command-line-reference)
+  - [Background Monitoring](#background-monitoring)
+- [Distribution](#distribution)
 - [Logging & Debugging](#logging--debugging)
 - [Output & Reports](#output--reports)
 - [CI/CD Integration](#cicd-integration)
@@ -61,7 +65,7 @@ A production-grade security tool for detecting malicious packages and supply cha
 
 ## The Solution
 
-**ore-mal-pkg-inspector** addresses these challenges by providing:
+**OreWatch** addresses these challenges by providing:
 
 **Comprehensive Multi-Ecosystem Coverage:** Single tool for npm, PyPI, Maven, RubyGems, Go, and Cargo packages
 
@@ -92,8 +96,8 @@ Scans for Shai-Hulud attack patterns (original and 2.0 variants), malicious hook
 **Shai-Hulud Integration**
 Cross-references npm packages against the comprehensive Shai-Hulud affected packages list from OreNPMGuard.
 
-**SARIF-Compliant Reporting**
-Generates structured JSON reports compatible with GitHub Advanced Security and other security platforms.
+**Structured JSON Reporting**
+Generates machine-readable JSON reports with explicit threat-data metadata and SARIF-style file locations for findings.
 
 **Flexible Input Formats**
 Supports standard dependency files (package.json, requirements.txt, etc.) and generic package lists (text, JSON, YAML).
@@ -106,10 +110,10 @@ Read-only operations with no modifications to your code, optimized for scanning 
 
 ---
 
-## Why ore-mal-pkg-inspector?
+## Why OreWatch?
 
 **vs. Single-Ecosystem Tools**
-Most security scanners focus on one package manager. ore-mal-pkg-inspector provides unified protection across six major ecosystems, essential for modern polyglot development environments.
+Most security scanners focus on one package manager. OreWatch provides unified protection across six major ecosystems, essential for modern polyglot development environments.
 
 **vs. Manual Threat Lists**
 Static malicious package lists become outdated quickly. Our automated collectors fetch fresh threat intelligence daily from multiple authoritative sources.
@@ -124,7 +128,7 @@ Manual dependency reviews are time-consuming and error-prone. Automated scanning
 Proprietary tools lack transparency in detection logic. As an open-source project, every detection rule and data source is auditable.
 
 **Origin Story**
-ore-mal-pkg-inspector was born from the development of [OreNPMGuard](https://github.com/rapticore/OreNPMGuard), a specialized scanner for Shai-Hulud npm attacks. During that project, we recognized the need for broader multi-ecosystem coverage beyond npm. In December 2025, we extracted and enhanced the multi-ecosystem detection capabilities into this standalone tool, maintaining OreNPMGuard's focus on npm while enabling ore-mal-pkg-inspector to serve the wider developer community across all major package ecosystems.
+OreWatch was born from the development of [OreNPMGuard](https://github.com/rapticore/OreNPMGuard), a specialized scanner for Shai-Hulud npm attacks. During that project, we recognized the need for broader multi-ecosystem coverage beyond npm. In December 2025, we extracted and enhanced the multi-ecosystem detection capabilities into this standalone tool, maintaining OreNPMGuard's focus on npm while enabling OreWatch to serve the wider developer community across all major package ecosystems.
 
 ---
 
@@ -132,10 +136,11 @@ ore-mal-pkg-inspector was born from the development of [OreNPMGuard](https://git
 
 ### Prerequisites
 
-- **Python 3.9 or higher**
+- **Python 3.14 or higher**
 - **pip** for installing dependencies
 - **Git** for cloning the repository
 - **Internet connection** for initial threat intelligence setup
+- **OpenSSL** for signed snapshot key generation, publishing, and verification in monitor snapshot workflows
 
 ### Installation
 
@@ -148,11 +153,16 @@ cd ore-mal-pkg-inspector
 python3 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install the project and its CLI entry point
+pip install .
 ```
 
-_Note: Threat intelligence data will be collected automatically on first scan._
+_Note: Threat intelligence data is collected automatically on first scan. Core sources are enabled by default; experimental sources are opt-in._
+
+_Note: The commands above install the project from a source checkout. This is the current development and contributor path. See [Distribution](#distribution) for the recommended release model for end users and CI._
+
+_Installed CLI:_ `orewatch`  
+_Compatibility alias:_ `ore-mal-pkg-inspector`
 
 ### First Scan
 
@@ -160,13 +170,13 @@ _Note: Threat intelligence data will be collected automatically on first scan._
 
 ```bash
 # Auto-detect ecosystem and scan current directory
-python3 malicious_package_scanner.py .
+orewatch .
 
 # Scan specific project path
-python3 malicious_package_scanner.py /path/to/your/project
+orewatch /path/to/your/project
 
 # With verbose output to see progress
-python3 malicious_package_scanner.py /path/to/your/project --verbose
+orewatch /path/to/your/project --verbose
 ```
 
 **Expected output:**
@@ -218,50 +228,50 @@ Full report saved to: scan-output/malicious_packages_report_20251231_120000.json
 
 ```bash
 # Current directory
-python3 malicious_package_scanner.py .
+orewatch .
 
 # Specific directory
-python3 malicious_package_scanner.py /home/user/projects/my-app
+orewatch /home/user/projects/my-app
 
 # With absolute path
-python3 malicious_package_scanner.py ~/projects/backend-api
+orewatch ~/projects/backend-api
 ```
 
 **Scan Specific Dependency Files:**
 
 ```bash
 # Ecosystem auto-detected from filename
-python3 malicious_package_scanner.py --file package.json
-python3 malicious_package_scanner.py --file requirements.txt
-python3 malicious_package_scanner.py --file pom.xml
-python3 malicious_package_scanner.py --file Gemfile
-python3 malicious_package_scanner.py --file go.mod
-python3 malicious_package_scanner.py --file Cargo.toml
+orewatch --file package.json
+orewatch --file requirements.txt
+orewatch --file pom.xml
+orewatch --file Gemfile
+orewatch --file go.mod
+orewatch --file Cargo.toml
 ```
 
 **Force Specific Ecosystem:**
 
 ```bash
 # Override auto-detection
-python3 malicious_package_scanner.py /path/to/project --ecosystem npm
-python3 malicious_package_scanner.py /path/to/project --ecosystem pypi
-python3 malicious_package_scanner.py /path/to/project --ecosystem maven
-python3 malicious_package_scanner.py /path/to/project --ecosystem rubygems
-python3 malicious_package_scanner.py /path/to/project --ecosystem go
-python3 malicious_package_scanner.py /path/to/project --ecosystem cargo
+orewatch /path/to/project --ecosystem npm
+orewatch /path/to/project --ecosystem pypi
+orewatch /path/to/project --ecosystem maven
+orewatch /path/to/project --ecosystem rubygems
+orewatch /path/to/project --ecosystem go
+orewatch /path/to/project --ecosystem cargo
 ```
 
 **Scan Generic Package Lists:**
 
 ```bash
 # Text file (one package per line) - must specify ecosystem
-python3 malicious_package_scanner.py --file packages.txt --ecosystem pypi
+orewatch --file packages.txt --ecosystem pypi
 
 # JSON file with package array
-python3 malicious_package_scanner.py --file packages.json --ecosystem npm
+orewatch --file packages.json --ecosystem npm
 
 # YAML file
-python3 malicious_package_scanner.py --file packages.yaml --ecosystem npm
+orewatch --file packages.yaml --ecosystem npm
 ```
 
 ### Advanced Usage
@@ -270,30 +280,46 @@ python3 malicious_package_scanner.py --file packages.yaml --ecosystem npm
 
 ```bash
 # Save to custom location
-python3 malicious_package_scanner.py /path/to/project --output /tmp/scan_report.json
+orewatch /path/to/project --output /tmp/scan_report.json
 
 # Save to specific subdirectory
-python3 malicious_package_scanner.py /path/to/project --output reports/security/$(date +%Y%m%d).json
+orewatch /path/to/project --output reports/security/$(date +%Y%m%d).json
 ```
 
 **IoC Scanning Control:**
 
 ```bash
 # Full scan (packages + IoCs) - default behavior
-python3 malicious_package_scanner.py /path/to/project
+orewatch /path/to/project
 
 # Skip IoC scanning for faster package-only checks
-python3 malicious_package_scanner.py /path/to/project --no-ioc
+orewatch /path/to/project --no-ioc
 
 # Only scan for IoCs, skip package database checking
-python3 malicious_package_scanner.py /path/to/project --ioc-only
+orewatch /path/to/project --ioc-only
 ```
 
 **Quiet Mode:**
 
 ```bash
 # Generate report without console summary (useful for scripts)
-python3 malicious_package_scanner.py /path/to/project --no-summary
+orewatch /path/to/project --no-summary
+```
+
+**Threat Data Controls:**
+
+```bash
+# Force a full refresh of the default core sources before scanning
+orewatch /path/to/project --latest-data
+
+# Fail if any requested ecosystem only has partial or missing threat data
+orewatch /path/to/project --strict-data
+
+# Include experimental sources during collection
+orewatch /path/to/project --latest-data --include-experimental-sources
+
+# Print the exact dependency filenames the scanner recognizes
+orewatch --list-supported-files
 ```
 
 **Batch Scanning:**
@@ -302,7 +328,7 @@ python3 malicious_package_scanner.py /path/to/project --no-summary
 # Scan multiple projects
 for dir in ~/projects/*/; do
     echo "Scanning $dir"
-    python3 malicious_package_scanner.py "$dir" --output "reports/$(basename $dir).json"
+    orewatch "$dir" --output "reports/$(basename $dir).json"
 done
 ```
 
@@ -318,9 +344,152 @@ done
 | `--no-summary` | | Skip printing report summary to console | False |
 | `--no-ioc` | | Skip IoC (Indicators of Compromise) scanning | False |
 | `--ioc-only` | | Only scan for IoCs, skip package checking | False |
-| `--latest-data` | | Force collection of latest threat intelligence before scanning (takes 10-15 minutes) | False |
+| `--latest-data` | | Force recollection and rebuild of threat intelligence before scanning | False |
+| `--strict-data` | | Fail if any requested ecosystem has partial or missing threat data | False |
+| `--include-experimental-sources` | | Include experimental collectors during threat-data refresh | False |
+| `--list-supported-files` | | Print the exact supported dependency manifest filenames and exit | False |
 | `--verbose` | `-v` | Show INFO level logs (progress messages) | False |
 | `--debug` | | Show DEBUG level logs (detailed diagnostics) | False |
+
+### Background Monitoring
+
+The repository now includes a local background monitor that runs inside the repo under `.ore-monitor/`. It keeps threat data fresh, watches opted-in projects for manifest and workflow changes, runs debounced scans, and records notifications for new or escalated findings.
+
+**Initialize and inspect the monitor:**
+
+```bash
+orewatch monitor install
+orewatch monitor install --service-manager launchd --no-start
+orewatch monitor status
+orewatch monitor doctor
+```
+
+**Manage watched projects:**
+
+```bash
+orewatch monitor watch add /path/to/project
+orewatch monitor watch list
+orewatch monitor watch remove /path/to/project
+```
+
+**Run the service:**
+
+```bash
+# Background
+orewatch monitor start
+orewatch monitor restart
+orewatch monitor stop
+orewatch monitor uninstall
+
+# Foreground
+orewatch monitor run
+```
+
+**Manual monitor actions:**
+
+```bash
+# Trigger immediate scans for all watched projects
+orewatch monitor scan-now
+
+# Trigger one watched project only
+orewatch monitor scan-now /path/to/project
+
+# Generate a signing keypair
+orewatch monitor snapshot keygen /tmp/ore-keys
+
+# Build and apply local threat-data snapshots
+orewatch monitor snapshot build /tmp/ore-snapshot \
+  --private-key /tmp/ore-keys/snapshot_signing_private.pem \
+  --public-key /tmp/ore-keys/snapshot_signing_public.pem
+orewatch monitor snapshot apply /tmp/ore-snapshot/manifest.json \
+  --public-key /tmp/ore-keys/snapshot_signing_public.pem
+
+# Publish a hosted snapshot channel
+orewatch monitor snapshot publish /tmp/ore-snapshots \
+  --base-url https://example.com/ore-snapshots \
+  --channel stable \
+  --private-key /tmp/ore-keys/snapshot_signing_private.pem \
+  --public-key /tmp/ore-keys/snapshot_signing_public.pem
+```
+
+**Monitor behavior:**
+- Quick scans are package-focused and run on a schedule and after generic manifest changes.
+- Full scans include IoC detection and run nightly, on manual request, and after workflow or payload-file changes.
+- New state is stored in `.ore-monitor/state.db`, reports in `.ore-monitor/reports/`, and service templates in `.ore-monitor/services/`.
+- Per-project policy overrides can be stored in `.ore-monitor.yml` at the project root.
+- `monitor install` now installs a user-level `launchd` or `systemd` service when available, and falls back to the repo-local background mode otherwise.
+- Hosted updates use a signed channel descriptor or manifest configured under `.ore-monitor/config.yaml` in `snapshots.channel_url` or `snapshots.manifest_url`, and the monitor verifies them with `snapshots.public_key_path`.
+- Signed snapshot workflows currently require `openssl` on the local machine.
+
+---
+
+## Distribution
+
+The project now has two distinct distribution surfaces:
+
+1. **The CLI and monitor code**
+2. **The threat-data snapshots consumed by the monitor**
+
+They should be distributed separately.
+
+### Recommended Package Distribution
+
+**Best default for developers:** publish the scanner as a normal Python package to PyPI and recommend installation with `pipx`.
+
+Why this is the best fit:
+- The project is a Python CLI and background monitor, so a universal wheel plus source distribution is the most direct release artifact.
+- `pipx` gives developers an isolated, user-level install without polluting project virtualenvs.
+- CI can still install the same version with `pip install orewatch==<version>`.
+- This keeps the CLI upgrade path simple while leaving threat-data updates to the signed snapshot channel.
+
+**Recommended release shape:**
+- Publish `sdist` and universal wheel artifacts to PyPI.
+- Expose the `orewatch` console entry point.
+- Keep `ore-mal-pkg-inspector` as a temporary compatibility alias.
+- Document `pipx install orewatch` for local developer installs.
+- Document `pip install orewatch==<version>` for CI and pinned automation.
+
+**Recommended secondary channel:** add a Homebrew formula only after the PyPI package and console entry point are stable. Homebrew is a convenience layer, not the primary release artifact.
+
+**Best option for contributors:** keep the current source-checkout flow:
+
+```bash
+git clone https://github.com/rapticore/ore-mal-pkg-inspector.git
+cd ore-mal-pkg-inspector
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+### Recommended Snapshot Distribution
+
+Threat-data snapshots should not be bundled inside the Python package. They change on a different cadence and are already supported as signed hosted artifacts.
+
+**Best default:** publish versioned signed snapshots to static HTTPS hosting and let clients refresh them independently.
+
+Recommended hosting targets:
+- GitHub Releases assets
+- S3 or Cloudflare R2 behind HTTPS
+- Any static CDN-backed bucket that serves immutable versioned files
+
+Recommended snapshot layout:
+- `versions/<version>/manifest.json`
+- `versions/<version>/*.db`
+- `channels/stable.json`
+
+Recommended trust model:
+- Keep the private signing key offline
+- Ship only the public verification key with the client config or package
+- Verify every channel descriptor and manifest before download/apply
+
+### Recommended Overall Model
+
+For a production release, the cleanest setup is:
+- Distribute the application as a PyPI package
+- Install locally with `pipx`
+- Install in CI with `pip`
+- Distribute threat data as signed snapshot channels over HTTPS
+- Treat source checkout as a development path, not the primary end-user install
 
 ---
 
@@ -333,7 +502,7 @@ By default, the scanner shows only warnings, errors, and the final summary. For 
 **See progress messages and collection statistics:**
 
 ```bash
-python3 malicious_package_scanner.py /path/to/project --verbose
+orewatch /path/to/project --verbose
 ```
 
 **Output includes:**
@@ -360,7 +529,7 @@ INFO: IoC scan complete: 0 indicators found
 **See detailed diagnostic information for troubleshooting:**
 
 ```bash
-python3 malicious_package_scanner.py /path/to/project --debug
+orewatch /path/to/project --debug
 ```
 
 **Output includes:**
@@ -399,7 +568,7 @@ python3 orchestrator.py --debug
 
 ### Report Structure
 
-Reports are saved to the `scan-output/` directory by default (or custom path with `--output`). The JSON format is SARIF-compatible for integration with security platforms.
+Reports are saved to the `scan-output/` directory by default (or a custom path with `--output`). The default report format is project-specific JSON. It includes threat-data availability metadata and uses SARIF-style `physicalLocation` objects for package findings, but it is not a full SARIF 2.1.0 document.
 
 **Example report:**
 
@@ -409,6 +578,10 @@ Reports are saved to the `scan-output/` directory by default (or custom path wit
   "ecosystem": "npm",
   "scanned_path": "/path/to/project",
   "total_packages_scanned": 150,
+  "data_status": "complete",
+  "sources_used": ["openssf", "osv"],
+  "experimental_sources_used": [],
+  "missing_ecosystems": [],
   "malicious_packages_found": 2,
   "iocs_found": 3,
   "malicious_packages": [
@@ -441,6 +614,12 @@ Reports are saved to the `scan-output/` directory by default (or custom path wit
   ]
 }
 ```
+
+**Threat data fields:**
+- `data_status`: `complete`, `partial`, `failed`, or `not_applicable`
+- `sources_used`: sources that contributed usable threat data for the requested ecosystems
+- `experimental_sources_used`: experimental sources included in the scan data
+- `missing_ecosystems`: requested ecosystems that had no usable package-threat database
 
 ### Understanding Results
 
@@ -479,18 +658,18 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.14'
 
-      - name: Install ore-mal-pkg-inspector
+      - name: Install OreWatch
         run: |
           git clone https://github.com/rapticore/ore-mal-pkg-inspector.git scanner
           cd scanner
-          pip install -r requirements.txt
+          pip install .
 
       - name: Scan for malicious packages
         run: |
           cd scanner
-          python3 malicious_package_scanner.py ${{ github.workspace }} --latest-data
+          orewatch ${{ github.workspace }} --latest-data
 
       - name: Upload scan report
         uses: actions/upload-artifact@v4
@@ -506,7 +685,7 @@ jobs:
       - name: Scan and fail on malicious packages
         run: |
           cd scanner
-          python3 malicious_package_scanner.py ${{ github.workspace }} --latest-data --output report.json
+          orewatch ${{ github.workspace }} --latest-data --output report.json
 
           # Check if malicious packages were found
           MALICIOUS_COUNT=$(jq '.malicious_packages_found' report.json)
@@ -524,17 +703,14 @@ jobs:
 
 ```yaml
 malicious-package-scan:
-  image: python:3.9
+  image: python:3.14
   stage: security
   before_script:
     - git clone https://github.com/rapticore/ore-mal-pkg-inspector.git scanner
-    - cd scanner && pip install -r requirements.txt
+    - cd scanner && pip install .
   script:
-    - python3 malicious_package_scanner.py $CI_PROJECT_DIR --latest-data --output scan-report.json
+    - orewatch $CI_PROJECT_DIR --latest-data --strict-data --output scan-report.json
   artifacts:
-    reports:
-      # SARIF format compatible with GitLab security dashboard
-      sast: scan-report.json
     paths:
       - scan-report.json
     when: always
@@ -553,7 +729,7 @@ pipeline {
                 sh '''
                     git clone https://github.com/rapticore/ore-mal-pkg-inspector.git scanner
                     cd scanner
-                    python3 -m pip install -r requirements.txt
+                    python3 -m pip install .
                 '''
             }
         }
@@ -562,7 +738,7 @@ pipeline {
             steps {
                 sh '''
                     cd scanner
-                    python3 malicious_package_scanner.py ${WORKSPACE} --latest-data
+                    orewatch ${WORKSPACE} --latest-data
                 '''
             }
         }
@@ -586,7 +762,7 @@ Add to `.git/hooks/pre-commit`:
 echo "Running malicious package scan..."
 
 cd /path/to/ore-mal-pkg-inspector
-python3 malicious_package_scanner.py $PROJECT_DIR --no-summary
+orewatch $PROJECT_DIR --no-summary
 
 if [ $? -ne 0 ]; then
     echo "❌ Malicious packages or IoCs detected! Commit blocked."
@@ -607,18 +783,18 @@ echo "✅ Security scan passed"
 
 **Symptom:**
 ```
-WARNING: Database not found for ecosystem: npm
+ERROR: No usable threat data available for requested ecosystems: npm
 ```
 
-**Cause:** Automatic database collection may have failed, or databases were manually deleted.
+**Cause:** Threat-data collection failed, metadata is incomplete, or the requested ecosystems do not have usable local databases yet.
 
 **Solution:**
 ```bash
-# Force re-collection of threat intelligence
-python3 malicious_package_scanner.py /path/to/project --latest-data
+# Force recollection and require a complete result for the requested ecosystems
+orewatch /path/to/project --latest-data --strict-data
 ```
 
-**Note:** This error is rare with automatic collection. If it persists, check network connectivity and permissions.
+**Note:** If this persists, check network connectivity, filesystem permissions, and whether you intentionally requested experimental sources.
 
 #### "No packages detected" Warning
 
@@ -634,9 +810,9 @@ WARNING: No packages detected in /path/to/project
    ls /path/to/project  # Verify package.json or requirements.txt exists
    ```
 
-2. **Unsupported ecosystem:** Check if the ecosystem is supported
+2. **Unsupported or unexpected manifest:** Print the exact supported filenames
    ```bash
-   python3 malicious_package_scanner.py /path/to/project --ecosystem npm --verbose
+   orewatch --list-supported-files
    ```
 
 3. **File permissions:** Ensure files are readable
@@ -697,7 +873,7 @@ cd ore-mal-pkg-inspector
 
 2. **Check version:** The flagged version may be specific:
    ```bash
-   python3 malicious_package_scanner.py /path/to/project --verbose
+   orewatch /path/to/project --verbose
    ```
 
 3. **Report false positive:** If confirmed incorrect:
@@ -709,7 +885,7 @@ cd ore-mal-pkg-inspector
 
 ```bash
 # Scanner debug mode
-python3 malicious_package_scanner.py /path/to/project --debug 2> debug.log
+orewatch /path/to/project --debug 2> debug.log
 
 # Collector debug mode
 cd collectors
@@ -740,22 +916,29 @@ Malicious packages are published continuously. Daily updates ensure the latest p
 Run the scanner with the `--latest-data` flag to force an update:
 
 ```bash
-python3 malicious_package_scanner.py /path/to/project --latest-data
+orewatch /path/to/project --latest-data
 ```
 
-For automated updates in CI/CD, schedule periodic scans with `--latest-data` flag (e.g., daily).
+For automated updates in CI/CD, schedule periodic scans with `--latest-data` flag (e.g., daily). Add `--include-experimental-sources` only if you explicitly want Phylum-derived data included in the rebuild.
 
 **Note:** First-time scans automatically collect data, so manual updates are only needed to refresh existing databases.
 
 ### Where does the threat data come from?
 
-The tool aggregates malicious package information from **trusted security research sources**. The databases are built from authoritative threat intelligence maintained by security organizations and researchers who discover and report malicious packages.
+The default databases are built from the project’s **core threat sources**:
+- `openssf`
+- `osv`
+
+The scanner can also include the project’s **experimental** source set:
+- `phylum` with `--include-experimental-sources`
+
+`socketdev` is present in the repository as a disabled placeholder and is not part of the default collection path.
 
 For technical details about data sources, collection, and processing, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ### Does this tool modify my code or dependencies?
 
-**No.** ore-mal-pkg-inspector performs read-only operations. It:
+**No.** OreWatch performs read-only operations. It:
 - ✅ Reads dependency files
 - ✅ Queries threat databases
 - ✅ Scans for file patterns
@@ -790,10 +973,10 @@ It **never**:
 **Offline scanning:** ✅ Yes, once databases are initialized
 ```bash
 # Online: Initial setup (one-time - runs automatically on first scan)
-python3 malicious_package_scanner.py /path/to/project
+orewatch /path/to/project
 
 # Offline: Subsequent scans work with local databases
-python3 malicious_package_scanner.py /path/to/project
+orewatch /path/to/project
 ```
 
 **Offline updates:** ❌ No, threat intelligence collection requires internet access to fetch from security sources.
@@ -812,7 +995,7 @@ python3 malicious_package_scanner.py /path/to/project
 - Check package versions against advisory databases
 - Maintained by package registry teams
 
-**ore-mal-pkg-inspector:**
+**OreWatch:**
 - Focuses on malicious packages (not just vulnerable ones)
 - Detects typosquatting, malware, supply chain attacks
 - Cross-ecosystem coverage
@@ -825,7 +1008,7 @@ npm audit
 pip-audit
 
 # Check for malicious packages
-python3 malicious_package_scanner.py /path/to/project
+orewatch /path/to/project
 ```
 
 ### Does this work with private package registries?
@@ -851,14 +1034,14 @@ python3 malicious_package_scanner.py /path/to/project
 ```bash
 
 # Scan specific files instead of entire directory
-python3 malicious_package_scanner.py --file package.json
+orewatch --file package.json
 ```
 
 ---
 
 ## Contributing
 
-We welcome contributions! Whether you're reporting bugs, suggesting features, or contributing code, your help improves ore-mal-pkg-inspector for everyone.
+We welcome contributions! Whether you're reporting bugs, suggesting features, or contributing code, your help improves OreWatch for everyone.
 
 **Report bugs or request features:**
 - GitHub Issues: https://github.com/rapticore/ore-mal-pkg-inspector/issues
@@ -873,7 +1056,7 @@ We welcome contributions! Whether you're reporting bugs, suggesting features, or
 
 ## Security Policy
 
-Security is our top priority. ore-mal-pkg-inspector is a security tool, and we take vulnerabilities seriously.
+Security is our top priority. OreWatch is a security tool, and we take vulnerabilities seriously.
 
 ### Reporting Security Vulnerabilities
 
@@ -901,7 +1084,7 @@ Instead, report privately:
 
 ### Security Best Practices
 
-When using ore-mal-pkg-inspector:
+When using OreWatch:
 
 **Do:**
 - ✅ Run with least privilege (no root/admin required)
@@ -1012,7 +1195,7 @@ Contact: contact@rapticore.com
 
 This project was extracted from the [OreNPMGuard](https://github.com/rapticore/OreNPMGuard) repository to maintain clear project focus while expanding capabilities.
 
-**OreNPMGuard** (December 2025) specializes in Shai-Hulud npm attack detection with 738+ affected packages and deep IoC analysis. During its development, we recognized the need for broader multi-ecosystem protection, leading to the creation of ore-mal-pkg-inspector as a standalone tool serving the wider developer community across all major package ecosystems.
+**OreNPMGuard** (December 2025) specializes in Shai-Hulud npm attack detection with 738+ affected packages and deep IoC analysis. During its development, we recognized the need for broader multi-ecosystem protection, leading to the creation of OreWatch as a standalone tool serving the wider developer community across all major package ecosystems.
 
 
 ### Related Projects

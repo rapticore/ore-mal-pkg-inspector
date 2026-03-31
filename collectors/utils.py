@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-
-# Module logger
-logger = logging.getLogger(__name__)
-
-Utility functions for package collectors
-Simple, function-based helpers for HTTP requests, file I/O, and data processing
+Utility functions for package collectors.
+Simple, function-based helpers for HTTP requests, file I/O, and data processing.
 """
 
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
@@ -17,6 +14,25 @@ from urllib.error import URLError, HTTPError
 
 
 import logging
+
+
+logger = logging.getLogger(__name__)
+MINIMUM_PYTHON = (3, 14)
+
+
+def ensure_supported_python() -> None:
+    """Fail fast when collectors are run on an unsupported interpreter."""
+    if sys.version_info < MINIMUM_PYTHON:
+        version = ".".join(str(part) for part in MINIMUM_PYTHON)
+        raise SystemExit(
+            f"Collector utilities require Python {version}+; "
+            f"found {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        )
+
+
+ensure_supported_python()
+
+
 def fetch_json(url, headers=None, timeout=30):
     """
     Fetch JSON from URL with error handling

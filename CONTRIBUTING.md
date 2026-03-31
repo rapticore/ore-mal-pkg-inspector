@@ -1,6 +1,6 @@
-# Contributing to ore-mal-pkg-inspector
+# Contributing to OreWatch
 
-Thank you for your interest in contributing to ore-mal-pkg-inspector! This document provides guidelines for developers who want to contribute code, documentation, or other improvements to the project.
+Thank you for your interest in OreWatch! This document provides guidelines for developers who want to contribute code, documentation, or other improvements to the project.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ We appreciate detailed bug reports that help us improve the tool.
 
 Include the following information:
 
-- **ore-mal-pkg-inspector version**: Check with `git describe --tags` or note your commit hash
+- **OreWatch version**: Check with `git describe --tags` or note your commit hash
 - **Python version**: Output of `python3 --version`
 - **Operating System**: Linux, macOS, Windows (with version)
 - **Steps to reproduce**: Detailed steps that consistently reproduce the issue
@@ -99,19 +99,19 @@ Follow the guidelines in this document:
 
 ```bash
 # Test scanner functionality
-python3 malicious_package_scanner.py /path/to/test/project --debug
+orewatch /path/to/test/project --debug
 
 # Test with various ecosystems
-python3 malicious_package_scanner.py --file package.json
-python3 malicious_package_scanner.py --file requirements.txt
+orewatch --file package.json
+orewatch --file requirements.txt
 
 # Test collectors
 cd collectors
 python3 orchestrator.py --sources openssf --verbose
 
 # Test edge cases
-python3 malicious_package_scanner.py nonexistent-path  # Should handle gracefully
-python3 malicious_package_scanner.py --file invalid.json --ecosystem npm
+orewatch nonexistent-path  # Should handle gracefully
+orewatch --file invalid.json --ecosystem npm
 ```
 
 ### 5. Commit Your Changes
@@ -162,7 +162,7 @@ Then open a pull request on GitHub with:
 
 ### Prerequisites
 
-- Python 3.9 or higher
+- Python 3.14 or higher
 - Git
 - Virtual environment (recommended)
 
@@ -177,11 +177,11 @@ cd ore-mal-pkg-inspector
 python3 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install the project in editable mode
+pip install -e .
 
 # Verify installation
-python3 malicious_package_scanner.py --help
+orewatch --help
 
 # Note: First scan will auto-collect threat intelligence data
 # Or manually collect for testing:
@@ -198,7 +198,7 @@ source .venv/bin/activate
 # ... edit files ...
 
 # Test changes
-python3 malicious_package_scanner.py /path/to/test/project --debug
+orewatch /path/to/test/project --debug
 
 # Run collectors if testing threat intelligence
 cd collectors
@@ -401,10 +401,10 @@ Update `collectors/orchestrator.py` to include the new collector.
 
 ```bash
 # Test detection
-python3 malicious_package_scanner.py /path/to/nuget/project --verbose
+orewatch /path/to/nuget/project --verbose
 
 # Test parsing
-python3 malicious_package_scanner.py --file packages.config --ecosystem nuget
+orewatch --file packages.config --ecosystem nuget
 
 # Test database building
 cd collectors
@@ -563,21 +563,21 @@ Before submitting a PR, test your changes:
 **Scanner Tests:**
 ```bash
 # Test basic scanning
-python3 malicious_package_scanner.py /path/to/test/project --verbose
+orewatch /path/to/test/project --verbose
 
 # Test ecosystem detection
-python3 malicious_package_scanner.py /path/to/multi-lang-project
+orewatch /path/to/multi-lang-project
 
 # Test file parsing
-python3 malicious_package_scanner.py --file package.json
-python3 malicious_package_scanner.py --file requirements.txt
+orewatch --file package.json
+orewatch --file requirements.txt
 
 # Test error handling
-python3 malicious_package_scanner.py nonexistent-path
-python3 malicious_package_scanner.py --file invalid.json --ecosystem npm
+orewatch nonexistent-path
+orewatch --file invalid.json --ecosystem npm
 
 # Test debug mode
-python3 malicious_package_scanner.py . --debug 2> debug.log
+orewatch . --debug 2> debug.log
 ```
 
 **Collector Tests:**
@@ -598,17 +598,17 @@ python3 build_unified_index.py
 ```bash
 # Test first-run auto-collection (delete databases first)
 rm collectors/final-data/*.db
-python3 malicious_package_scanner.py test-malicious-package.json
+orewatch test-malicious-package.json
 
 # Test --latest-data flag
-python3 malicious_package_scanner.py test-malicious-package.json --latest-data
+orewatch test-malicious-package.json --latest-data
 
 # Test graceful failure (disconnect network or block internet)
 # Should warn but continue with old data
-python3 malicious_package_scanner.py . --latest-data
+orewatch . --latest-data
 
 # Test with existing databases (should skip collection)
-python3 malicious_package_scanner.py . --verbose
+orewatch . --verbose
 # Should show: DEBUG: Threat intelligence databases found
 ```
 
@@ -656,4 +656,4 @@ Report issues to: security@rapticore.com
 - **Bug reports**: https://github.com/rapticore/ore-mal-pkg-inspector/issues
 - **Security issues**: security@rapticore.com
 
-Thank you for contributing to ore-mal-pkg-inspector!
+Thank you for contributing to OreWatch!
