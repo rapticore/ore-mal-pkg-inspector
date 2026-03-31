@@ -30,6 +30,21 @@ SKIPPED_REQUIREMENT_PREFIXES = (
     "../",
 )
 
+NON_VERSION_SPEC_PREFIXES = (
+    "workspace:",
+    "file:",
+    "link:",
+    "git+",
+    "github:",
+    "gitlab:",
+    "http://",
+    "https://",
+)
+
+EXACT_VERSION_RE = re.compile(
+    r"^[vV]?\d+(?:\.\d+)*(?:[-+._]?[A-Za-z0-9]+(?:[-+._][A-Za-z0-9]+)*)?$"
+)
+
 
 def _make_physical_location(
     file_path: str,
@@ -86,6 +101,13 @@ def _extract_first_version(version_spec: str) -> str:
     if not spec or spec == "*":
         return ""
 
+    if spec.startswith(NON_VERSION_SPEC_PREFIXES):
+        return ""
+
+    if spec.startswith("npm:"):
+        _, _, aliased_version = spec[4:].rpartition("@")
+        return _extract_first_version(aliased_version) if aliased_version else ""
+
     if spec.startswith(("^", "~")):
         return spec[1:].strip()
 
@@ -93,7 +115,24 @@ def _extract_first_version(version_spec: str) -> str:
     if match:
         return match.group(1).strip("\"'")
 
+    if EXACT_VERSION_RE.fullmatch(spec):
+        return spec
+
     return ""
+
+
+def _extract_exact_requirement_version(specifier_text: str) -> str:
+    """Return an exact pinned requirement version, or empty string for ranges/unknowns."""
+    spec = str(specifier_text or "").strip()
+    if not spec:
+        return ""
+
+    match = re.fullmatch(r"(?:===|==)\s*([^,;\s]+)", spec)
+    if not match:
+        return ""
+
+    version = match.group(1).strip("\"'")
+    return "" if "*" in version else version
 
 
 def _parse_requirement_string(requirement_str: str) -> Optional[Tuple[str, str]]:
@@ -116,14 +155,14 @@ def _parse_requirement_string(requirement_str: str) -> Optional[Tuple[str, str]]
 
     try:
         requirement = Requirement(candidate)
-        return requirement.name, _extract_first_version(str(requirement.specifier))
+        return requirement.name, _extract_exact_requirement_version(str(requirement.specifier))
     except InvalidRequirement:
         match = re.match(r"^([A-Za-z0-9_.-]+(?:\[[^\]]+\])?)(.*)$", candidate)
         if not match:
             return None
 
         pkg_name = re.sub(r"\[.*\]", "", match.group(1))
-        version = _extract_first_version(match.group(2))
+        version = _extract_exact_requirement_version(match.group(2))
         return pkg_name, version
 
 

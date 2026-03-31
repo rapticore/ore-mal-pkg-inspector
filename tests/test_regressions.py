@@ -7,8 +7,9 @@ import unittest
 from unittest.mock import patch
 
 import malicious_package_scanner as scanner
-from collectors import collect_osv, collect_socketdev, utils
+from collectors import collect_osv, collect_socketdev, db as collector_db, utils
 from scanners import dependency_parsers, report_generator
+from scanners.malicious_checker import MaliciousPackageChecker
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -22,6 +23,24 @@ def _import_orchestrator():
 
 
 class ScannerRegressionTests(unittest.TestCase):
+    def _create_temp_checker(self, temp_dir, ecosystem, packages):
+        collectors_dir = os.path.join(temp_dir, "collectors")
+        final_data_dir = os.path.join(collectors_dir, "final-data")
+        os.makedirs(final_data_dir, exist_ok=True)
+        db_path = os.path.join(final_data_dir, f"unified_{ecosystem}.db")
+
+        conn, temp_db_path = collector_db.create_database(db_path)
+        collector_db.insert_packages(conn, packages)
+        collector_db.insert_metadata(
+            conn,
+            ecosystem=ecosystem,
+            packages=packages,
+            timestamp="2026-03-31T00:00:00Z",
+        )
+        collector_db.finalize_database(conn, temp_db_path, db_path)
+
+        return MaliciousPackageChecker(collectors_dir=collectors_dir)
+
     def test_aggregate_package_locations_keeps_same_name_across_ecosystems(self):
         aggregated = scanner.aggregate_package_locations(
             [
@@ -179,7 +198,7 @@ class ScannerRegressionTests(unittest.TestCase):
 
         self.assertEqual(
             [(pkg["name"], pkg["version"]) for pkg in packages],
-            [("requests", "2.31"), ("flask", "3.0.0")],
+            [("requests", ""), ("flask", "3.0.0")],
         )
 
     def test_build_gradle_dependencies_are_parsed(self):
@@ -196,6 +215,102 @@ class ScannerRegressionTests(unittest.TestCase):
         self.assertEqual(
             [(pkg["name"], pkg["version"]) for pkg in packages],
             [("org.slf4j:slf4j-api", "2.0.13")],
+        )
+
+    def test_package_json_exact_versions_are_preserved_for_matching(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            package_json_path = os.path.join(temp_dir, "package.json")
+            with open(package_json_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "{\n"
+                    '  "dependencies": {\n'
+                    '    "debug": "4.3.1"\n'
+                    "  },\n"
+                    '  "devDependencies": {\n'
+                    '    "eslint-config-prettier": "8.6.0",\n'
+                    '    "eslint-plugin-prettier": "5.1.3"\n'
+                    "  }\n"
+                    "}\n"
+                )
+
+            packages = dependency_parsers.parse_npm_dependencies(package_json_path)
+
+        self.assertEqual(
+            [(pkg["name"], pkg["version"]) for pkg in packages],
+            [
+                ("debug", "4.3.1"),
+                ("eslint-config-prettier", "8.6.0"),
+                ("eslint-plugin-prettier", "5.1.3"),
+            ],
+        )
+
+    def test_package_json_exact_version_does_not_false_positive_on_other_malicious_version(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checker = self._create_temp_checker(
+                temp_dir,
+                "npm",
+                [
+                    {
+                        "name": "debug",
+                        "versions": ["4.4.2"],
+                        "sources": ["osv"],
+                        "severity": "critical",
+                        "description": "Malicious debug release",
+                        "detected_behaviors": ["malicious_code"],
+                    }
+                ],
+            )
+
+            results = checker.check_packages(
+                [{"name": "debug", "version": "4.3.1"}],
+                "npm",
+                include_shai_hulud=False,
+            )
+
+        self.assertEqual(results, [])
+
+    def test_unknown_requirement_version_is_conservatively_flagged(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            checker = self._create_temp_checker(
+                temp_dir,
+                "pypi",
+                [
+                    {
+                        "name": "evilpkg",
+                        "versions": ["1.0.0"],
+                        "sources": ["osv"],
+                        "severity": "critical",
+                        "description": "Malicious release of evilpkg",
+                        "detected_behaviors": ["malicious_code"],
+                    }
+                ],
+            )
+
+            results = checker.check_packages(
+                [{"name": "evilpkg", "version": ""}],
+                "pypi",
+                include_shai_hulud=False,
+            )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name"], "evilpkg")
+        self.assertEqual(results[0]["matched_version"], "1.0.0")
+
+    def test_litellm_exact_requirement_stays_exact_while_range_becomes_unknown(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            requirements_path = os.path.join(temp_dir, "requirements.txt")
+            with open(requirements_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "litellm==1.52.3\n"
+                    "fastapi~=0.115.0\n"
+                    "openai>=1.40.0,<2\n"
+                )
+
+            packages = dependency_parsers.parse_dependencies(requirements_path, "pypi")
+
+        self.assertEqual(
+            [(pkg["name"], pkg["version"]) for pkg in packages],
+            [("litellm", "1.52.3"), ("fastapi", ""), ("openai", "")],
         )
 
     def test_cargo_lock_dependencies_are_parsed(self):
