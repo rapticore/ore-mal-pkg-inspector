@@ -19,6 +19,9 @@ from typing import Dict, List, Optional
 
 from logging_config import setup_logging
 from monitor.config import ensure_monitor_layout, get_repo_root, load_monitor_config
+from monitor.config import OWNER_ONLY_FILE_MODE
+from monitor.config import ensure_owner_only_permissions
+from monitor.config import ensure_not_symlink
 from monitor.notifier import Notifier
 from monitor.policy import build_tracked_findings, load_project_policy
 from monitor.scheduler import consume_ready_changes, determine_periodic_scan_kind, queue_change
@@ -43,6 +46,7 @@ def read_pid(pid_path: str) -> Optional[int]:
     """Read a PID file if it exists."""
     if not os.path.exists(pid_path):
         return None
+    ensure_not_symlink(pid_path, "monitor pid file")
     try:
         with open(pid_path, "r", encoding="utf-8") as handle:
             return int(handle.read().strip())
@@ -159,6 +163,7 @@ class MonitorService:
         setup_logging(logging.INFO)
         root_logger = logging.getLogger()
         log_file = self.paths["log_file"]
+        ensure_not_symlink(log_file, "monitor log file")
         if not any(
             isinstance(handler, logging.FileHandler)
             and getattr(handler, "baseFilename", "") == os.path.abspath(log_file)
@@ -170,6 +175,8 @@ class MonitorService:
                 logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
             )
             root_logger.addHandler(file_handler)
+        if os.path.exists(log_file):
+            ensure_owner_only_permissions(log_file, OWNER_ONLY_FILE_MODE)
 
     def _run_command(self, command: List[str]) -> subprocess.CompletedProcess:
         """Run a subprocess command and capture output."""
@@ -437,8 +444,11 @@ class MonitorService:
             "running": False,
             "pid": read_pid(self.paths["pid"]),
             "last_heartbeat_at": self.state.get_agent_state("last_heartbeat_at"),
+            "last_threat_refresh_attempt_at": self.state.get_agent_state("last_threat_refresh_attempt_at"),
             "last_threat_refresh_at": self.state.get_agent_state("last_threat_refresh_at"),
             "last_threat_refresh_status": self.state.get_agent_state("last_threat_refresh_status"),
+            "last_threat_refresh_message": self.state.get_agent_state("last_threat_refresh_message"),
+            "scan_blocked_reason": self.state.get_agent_state("scan_blocked_reason"),
             "current_snapshot_version": self.state.get_agent_state("current_snapshot_version"),
             "current_snapshot_key_id": self.state.get_agent_state("current_snapshot_key_id"),
             "watch_summary": summary,
@@ -634,8 +644,10 @@ class MonitorService:
         return results
 
     def _write_pid_file(self) -> None:
+        ensure_not_symlink(self.paths["pid"], "monitor pid file")
         with open(self.paths["pid"], "w", encoding="utf-8") as handle:
             handle.write(str(os.getpid()))
+        ensure_owner_only_permissions(self.paths["pid"], OWNER_ONLY_FILE_MODE)
 
     def _cleanup_pid_file(self) -> None:
         if os.path.exists(self.paths["pid"]):
@@ -671,7 +683,13 @@ class MonitorService:
     def run_iteration(self) -> None:
         """Run one service loop iteration."""
         self.state.set_agent_state("last_heartbeat_at", _utcnow())
-        self.updater.refresh_if_due(force=False)
+        refresh_result = self.updater.refresh_if_due(force=False)
+        if not refresh_result.get("success"):
+            message = refresh_result.get("message", "Threat data refresh failed")
+            self.state.set_agent_state("scan_blocked_reason", message)
+            logger.error("Threat data refresh failed; skipping scans: %s", message)
+            return
+        self.state.set_agent_state("scan_blocked_reason", "")
         projects = self.state.list_watched_projects()
 
         for project in projects:

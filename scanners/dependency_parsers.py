@@ -9,9 +9,9 @@ import json
 import os
 import re
 import tomllib
-import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
+from defusedxml import ElementTree as ET
 from packaging.requirements import InvalidRequirement, Requirement
 from scanners.supported_files import get_manifest_for_filename
 

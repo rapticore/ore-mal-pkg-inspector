@@ -27,7 +27,7 @@ def load_all_raw_data(source_names=None):
         list: List of data dictionaries from all sources
     """
     raw_data_dir = os.path.join(os.path.dirname(__file__), 'raw-data')
-    if source_names:
+    if source_names is not None:
         raw_files = [f'{source}.json' for source in source_names]
     else:
         raw_files = ['openssf.json', 'socketdev.json', 'osv.json', 'phylum.json']

@@ -21,6 +21,7 @@ from scanners.supported_files import ECOSYSTEM_PRIORITY, get_supported_files_for
 
 
 logger = get_logger(__name__)
+ALLOW_UNVERIFIED_LIVE_COLLECTION_ENV = "OREWATCH_ALLOW_UNVERIFIED_LIVE_COLLECTION"
 
 
 @dataclass
@@ -37,6 +38,7 @@ class ScanRequest:
     strict_data: bool = False
     include_experimental_sources: bool = False
     ensure_data: bool = True
+    allow_unverified_live_collection: bool = False
     print_summary: bool = True
 
 
@@ -319,6 +321,7 @@ def _load_orchestrator_helpers():
 def ensure_threat_data(
     force_update: bool = False,
     include_experimental_sources: bool = False,
+    allow_unverified_live_collection: bool = False,
 ) -> Dict[str, object]:
     """
     Ensure threat-intelligence databases exist and are fresh enough.
@@ -326,8 +329,29 @@ def ensure_threat_data(
     collect_all_data, databases_need_refresh, get_database_statuses, resolve_sources = (
         _load_orchestrator_helpers()
     )
+    database_statuses = get_database_statuses()
+    current_summary = {
+        "success": any(status.get("usable") for status in database_statuses.values()),
+        "database_statuses": database_statuses,
+        "selected_sources": resolve_sources(
+            include_experimental=include_experimental_sources
+        ),
+        "used_live_collection": False,
+    }
+    allow_live_collection = allow_unverified_live_collection or (
+        os.environ.get(ALLOW_UNVERIFIED_LIVE_COLLECTION_ENV) == "1"
+    )
 
     if force_update:
+        if not allow_live_collection:
+            current_summary["message"] = (
+                "Threat data refresh requires signed snapshots or explicit opt-in to "
+                "unverified live collection via --allow-unverified-live-collection "
+                f"or {ALLOW_UNVERIFIED_LIVE_COLLECTION_ENV}=1"
+            )
+            current_summary["refresh_required"] = True
+            logger.warning(current_summary["message"])
+            return current_summary
         print("=" * 60)
         print("Collecting latest threat intelligence data...")
         print("This may take 10-15 minutes depending on network speed.")
@@ -335,15 +359,17 @@ def ensure_threat_data(
         print()
     elif not databases_need_refresh(include_experimental=include_experimental_sources):
         logger.debug("Threat intelligence databases found")
-        database_statuses = get_database_statuses()
-        return {
-            "success": any(status.get("usable") for status in database_statuses.values()),
-            "database_statuses": database_statuses,
-            "selected_sources": resolve_sources(
-                include_experimental=include_experimental_sources
-            ),
-        }
+        return current_summary
     else:
+        if not allow_live_collection:
+            current_summary["message"] = (
+                "Threat data is missing or outdated. Apply a signed snapshot or rerun "
+                "with --latest-data --allow-unverified-live-collection to opt in to "
+                "unverified live collector refresh."
+            )
+            current_summary["refresh_required"] = True
+            logger.warning(current_summary["message"])
+            return current_summary
         print("=" * 60)
         print("Threat intelligence databases are missing or need refresh.")
         print("Collecting data from security sources...")
@@ -355,6 +381,7 @@ def ensure_threat_data(
         build_if_missing=not force_update,
         include_experimental=include_experimental_sources,
     )
+    summary["used_live_collection"] = True
 
     if summary.get("success"):
         print()
@@ -365,10 +392,11 @@ def ensure_threat_data(
 
     print()
     print("⚠ WARNING: Threat data collection failed")
-    print("Continuing scan with existing/cached data...")
+    print("Using currently available local threat data only.")
     print("=" * 60)
     print()
-    logger.warning("Collection failed, proceeding with available data")
+    logger.warning("Live collection failed; using current local threat data only")
+    summary["message"] = "Unverified live threat-data collection failed"
     return summary
 
 
@@ -376,13 +404,18 @@ def get_current_threat_data_summary(
     include_experimental_sources: bool = False,
 ) -> Dict[str, object]:
     """Return current threat-data statuses without forcing collection."""
-    _, _, get_database_statuses, resolve_sources = _load_orchestrator_helpers()
+    _, databases_need_refresh, get_database_statuses, resolve_sources = _load_orchestrator_helpers()
+    database_statuses = get_database_statuses()
     return {
-        "success": True,
-        "database_statuses": get_database_statuses(),
+        "success": any(status.get("usable") for status in database_statuses.values()),
+        "database_statuses": database_statuses,
         "selected_sources": resolve_sources(
             include_experimental=include_experimental_sources
         ),
+        "refresh_required": databases_need_refresh(
+            include_experimental=include_experimental_sources
+        ),
+        "used_live_collection": False,
     }
 
 
@@ -521,10 +554,44 @@ def run_scan(request: ScanRequest) -> ScanResult:
             threat_data_summary = ensure_threat_data(
                 force_update=request.force_latest_data,
                 include_experimental_sources=request.include_experimental_sources,
+                allow_unverified_live_collection=request.allow_unverified_live_collection,
             )
         else:
             threat_data_summary = get_current_threat_data_summary(
                 include_experimental_sources=request.include_experimental_sources
+            )
+
+    if request.force_latest_data:
+        refresh_error = None
+        if threat_data_summary.get("refresh_required") and not threat_data_summary.get(
+            "used_live_collection"
+        ):
+            refresh_error = threat_data_summary.get(
+                "message",
+                "Threat data refresh could not start",
+            )
+        elif threat_data_summary.get("used_live_collection") and not threat_data_summary.get(
+            "success"
+        ):
+            refresh_error = threat_data_summary.get(
+                "message",
+                "Threat data refresh failed",
+            )
+
+        if refresh_error:
+            scanned_target = request.file_path or request.target_path or ""
+            return ScanResult(
+                ecosystem="unknown",
+                scanned_path=scanned_target,
+                requested_ecosystems=[],
+                packages=[],
+                malicious_packages=[],
+                iocs=[],
+                report_path=None,
+                data_metadata={},
+                threat_data_summary=threat_data_summary,
+                exit_code=2,
+                message=refresh_error,
             )
 
     if request.file_path:
@@ -633,6 +700,13 @@ def run_scan(request: ScanRequest) -> ScanResult:
             )
 
         if not data_metadata["usable_ecosystems"]:
+            guidance = threat_data_summary.get("message")
+            message = (
+                "No usable threat data available for requested ecosystem(s): "
+                + ", ".join(requested_ecosystems)
+            )
+            if guidance:
+                message = f"{message}. {guidance}"
             return ScanResult(
                 ecosystem=", ".join(requested_ecosystems),
                 scanned_path=scanned_path,
@@ -644,10 +718,7 @@ def run_scan(request: ScanRequest) -> ScanResult:
                 data_metadata=data_metadata,
                 threat_data_summary=threat_data_summary,
                 exit_code=2,
-                message=(
-                    "No usable threat data available for requested ecosystem(s): "
-                    + ", ".join(requested_ecosystems)
-                ),
+                message=message,
             )
 
         if data_metadata["missing_ecosystems"]:

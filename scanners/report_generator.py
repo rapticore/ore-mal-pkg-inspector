@@ -12,6 +12,7 @@ from typing import List, Dict, Optional
 
 # Module logger
 logger = logging.getLogger(__name__)
+ABSOLUTE_PATH_REDACTED = "<absolute-path-redacted>"
 
 
 def get_timestamp() -> str:
@@ -37,6 +38,19 @@ def _get_project_root() -> str:
     # Go up one level to get project root
     project_root = os.path.dirname(scanners_dir)
     return project_root
+
+
+def _redact_path(path: str) -> str:
+    """
+    Remove absolute filesystem path disclosure from reports.
+    """
+    if not path:
+        return path
+
+    normalized = os.path.normpath(path)
+    if not os.path.isabs(normalized):
+        return normalized
+    return ABSOLUTE_PATH_REDACTED
 
 
 def generate_report(
@@ -82,7 +96,7 @@ def generate_report(
     report = {
         'scan_timestamp': get_timestamp(),
         'ecosystem': ecosystem,
-        'scanned_path': scanned_path,
+        'scanned_path': _redact_path(scanned_path),
         'total_packages_scanned': total_packages_scanned,
         'data_status': data_metadata.get('data_status', 'not_applicable'),
         'sources_used': data_metadata.get('sources_used', []),

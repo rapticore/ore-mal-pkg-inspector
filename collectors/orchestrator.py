@@ -393,12 +393,19 @@ def build_databases(
     print('='*60)
     selected_sources = selected_sources or resolve_sources()
     source_results = source_results or {}
+    effective_sources = selected_sources
+    if source_results:
+        effective_sources = [
+            source
+            for source in selected_sources
+            if source_results.get(source, {}).get('success')
+        ]
     timestamp = utils.get_timestamp()
     
     try:
         # Load all raw data
         print("\nLoading raw data files...")
-        raw_data_list = build_unified_index.load_all_raw_data(selected_sources)
+        raw_data_list = build_unified_index.load_all_raw_data(effective_sources)
         
         if not raw_data_list:
             print("⚠ No raw data files found")

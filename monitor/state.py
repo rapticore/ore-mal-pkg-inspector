@@ -11,6 +11,10 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
+from monitor.config import OWNER_ONLY_FILE_MODE
+from monitor.config import ensure_owner_only_permissions
+from monitor.config import ensure_not_symlink
+
 
 SEVERITY_RANK = {
     "low": 1,
@@ -30,13 +34,21 @@ class MonitorState:
 
     def __init__(self, db_path: str):
         self.db_path = db_path
+        ensure_not_symlink(os.path.dirname(db_path), "monitor state directory")
+        ensure_not_symlink(self.db_path, "monitor state database")
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.initialize()
+        self._secure_state_db()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _secure_state_db(self) -> None:
+        """Best-effort permission hardening for the state database."""
+        if os.path.exists(self.db_path):
+            ensure_owner_only_permissions(self.db_path, OWNER_ONLY_FILE_MODE)
 
     def initialize(self) -> None:
         """Create required tables."""
@@ -96,6 +108,7 @@ class MonitorState:
                 );
                 """
             )
+        self._secure_state_db()
 
     def add_watched_project(self, project_path: str, policy: Optional[Dict] = None) -> None:
         """Register or update a watched project."""

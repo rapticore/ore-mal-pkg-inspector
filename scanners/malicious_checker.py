@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import logging
+import hashlib
 import urllib.request
 import urllib.error
 import yaml
@@ -20,6 +21,8 @@ import db
 
 # Module logger
 logger = logging.getLogger(__name__)
+REMOTE_SHAI_HULUD_ENV = "OREWATCH_ENABLE_REMOTE_SHAI_HULUD_FEED"
+REMOTE_SHAI_HULUD_SHA256_ENV = "OREWATCH_SHAI_HULUD_YAML_SHA256"
 
 
 class MaliciousPackageChecker:
@@ -106,8 +109,7 @@ class MaliciousPackageChecker:
         
         # If download failed, try local file
         if config is None:
-            script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            config_path = os.path.join(script_dir, 'affected_packages.yaml')
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'affected_packages.yaml')
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = yaml.safe_load(f)
@@ -135,6 +137,17 @@ class MaliciousPackageChecker:
         Returns:
             Parsed YAML config or None on error
         """
+        if os.environ.get(REMOTE_SHAI_HULUD_ENV) != "1":
+            return None
+
+        expected_sha256 = os.environ.get(REMOTE_SHAI_HULUD_SHA256_ENV, "").strip().lower()
+        if not expected_sha256:
+            logger.warning(
+                "Remote Shai-Hulud feed requested but %s is not set; refusing unverified download",
+                REMOTE_SHAI_HULUD_SHA256_ENV,
+            )
+            return None
+
         try:
             req = urllib.request.Request(
                 self.github_yaml_url,
@@ -142,7 +155,16 @@ class MaliciousPackageChecker:
             )
             
             with urllib.request.urlopen(req, timeout=10) as response:
-                yaml_content = response.read().decode('utf-8')
+                raw_content = response.read()
+                digest = hashlib.sha256(raw_content).hexdigest()
+                if digest != expected_sha256:
+                    logger.warning(
+                        "Remote Shai-Hulud feed checksum mismatch: expected %s, got %s",
+                        expected_sha256,
+                        digest,
+                    )
+                    return None
+                yaml_content = raw_content.decode('utf-8')
                 config = yaml.safe_load(yaml_content)
                 return config
         except (urllib.error.URLError, urllib.error.HTTPError, yaml.YAMLError, KeyError) as e:

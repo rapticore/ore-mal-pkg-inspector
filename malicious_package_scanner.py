@@ -105,7 +105,13 @@ Examples:
         "--latest-data",
         action="store_true",
         dest="latest_data",
-        help="Force collection of latest threat intelligence before scanning (takes 10-15 minutes)",
+        help="Force a threat-data refresh before scanning; requires explicit opt-in for unverified live collection",
+    )
+    parser.add_argument(
+        "--allow-unverified-live-collection",
+        action="store_true",
+        dest="allow_unverified_live_collection",
+        help="Explicitly allow unverified live collector refresh instead of using only local/signed snapshot data",
     )
     parser.add_argument(
         "--strict-data",
@@ -177,7 +183,10 @@ def main(argv: list[str] | None = None) -> int:
         force_latest_data=args.latest_data,
         strict_data=args.strict_data,
         include_experimental_sources=args.include_experimental_sources,
-        ensure_data=not args.ioc_only,
+        ensure_data=(not args.ioc_only) and (
+            args.latest_data or args.allow_unverified_live_collection
+        ),
+        allow_unverified_live_collection=args.allow_unverified_live_collection,
         print_summary=not args.no_summary,
     )
     result = run_scan(request)

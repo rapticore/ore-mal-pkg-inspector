@@ -202,14 +202,14 @@ The background monitor uses the same scan engine as the foreground CLI.
 
 ### Runtime data
 
-The monitor stores runtime artifacts in `.ore-monitor/`:
+The monitor stores runtime artifacts in user-owned directories outside the repository, keyed by repository identity.
 
-- `.ore-monitor/config.yaml`
-- `.ore-monitor/state.db`
-- `.ore-monitor/reports/`
-- `.ore-monitor/services/`
-- `.ore-monitor/snapshots/`
-- `.ore-monitor/logs/monitor.log`
+- Linux config default: `~/.config/orewatch/instances/<repo>/config.yaml`
+- Linux state default: `~/.local/state/orewatch/instances/<repo>/`
+- macOS config default: `~/Library/Application Support/OreWatch/instances/<repo>/config.yaml`
+- macOS state default: `~/Library/Application Support/OreWatch/State/instances/<repo>/`
+- Per-instance state includes `state.db`, `reports/`, `snapshots/`, and `logs/monitor.log`
+- Per-instance config includes `config.yaml` and generated `services/` templates
 
 ### Service installation
 
@@ -249,7 +249,7 @@ Notifications are emitted only for new or escalated findings by default, which a
 
 Published snapshots use a static-hosting-friendly layout with versioned assets under `versions/<version>/` and channel pointers under `channels/<channel>.json`.
 
-Snapshot signing uses an offline private key and OpenSSL-backed RSA SHA-256 signatures. Verification uses only the public key configured in `.ore-monitor/config.yaml`.
+Snapshot signing uses an offline private key and OpenSSL-backed RSA SHA-256 signatures. Verification uses only the public key configured in the user-owned monitor config file.
 
 Snapshot application stages and validates all files before replacing `collectors/final-data/`, and it restores the previous directory if the final swap fails.
 

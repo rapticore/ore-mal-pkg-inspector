@@ -353,7 +353,7 @@ done
 
 ### Background Monitoring
 
-The repository now includes a local background monitor that runs inside the repo under `.ore-monitor/`. It keeps threat data fresh, watches opted-in projects for manifest and workflow changes, runs debounced scans, and records notifications for new or escalated findings.
+The repository now includes a local background monitor that keeps threat data fresh, watches opted-in projects for manifest and workflow changes, runs debounced scans, and records notifications for new or escalated findings. Monitor-owned config and state are stored outside the repo in user-owned directories so a cloned repository cannot preseed monitor behavior.
 
 **Initialize and inspect the monitor:**
 
@@ -415,10 +415,12 @@ orewatch monitor snapshot publish /tmp/ore-snapshots \
 **Monitor behavior:**
 - Quick scans are package-focused and run on a schedule and after generic manifest changes.
 - Full scans include IoC detection and run nightly, on manual request, and after workflow or payload-file changes.
-- New state is stored in `.ore-monitor/state.db`, reports in `.ore-monitor/reports/`, and service templates in `.ore-monitor/services/`.
+- On Linux, config defaults to `~/.config/orewatch/instances/<repo>/` and state defaults to `~/.local/state/orewatch/instances/<repo>/`.
+- On macOS, config defaults to `~/Library/Application Support/OreWatch/instances/<repo>/` and state defaults to `~/Library/Application Support/OreWatch/State/instances/<repo>/`.
+- `monitor doctor` prints the exact `config_path`, `state_db`, `log_file`, and service-template directory for the current repo instance.
 - Per-project policy overrides can be stored in `.ore-monitor.yml` at the project root.
 - `monitor install` now installs a user-level `launchd` or `systemd` service when available, and falls back to the repo-local background mode otherwise.
-- Hosted updates use a signed channel descriptor or manifest configured under `.ore-monitor/config.yaml` in `snapshots.channel_url` or `snapshots.manifest_url`, and the monitor verifies them with `snapshots.public_key_path`.
+- Hosted updates use a signed channel descriptor or manifest configured in the user-owned monitor config file via `snapshots.channel_url` or `snapshots.manifest_url`, and the monitor verifies them with `snapshots.public_key_path`.
 - Signed snapshot workflows currently require `openssl` on the local machine.
 
 ---

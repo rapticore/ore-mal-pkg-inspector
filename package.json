@@ -1,6 +1,6 @@
 {
   "name": "orewatch",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "OreWatch multi-ecosystem malicious package scanner and background monitor",
   "main": "malicious_package_scanner.py",
   "scripts": {

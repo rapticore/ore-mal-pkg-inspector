@@ -32,6 +32,11 @@ DEFAULT_PROJECT_POLICY = {
     "ignored_packages": [],
     "ignored_ioc_types": [],
 }
+PROJECT_SUPPRESSION_KEYS = {
+    "ignored_fingerprints",
+    "ignored_packages",
+    "ignored_ioc_types",
+}
 
 
 def _merge_dicts(base: Dict, override: Dict) -> Dict:
@@ -53,12 +58,23 @@ def severity_rank(severity: str) -> int:
 def load_project_policy(project_path: str, monitor_config: Dict) -> Dict:
     """Load the effective project policy."""
     defaults = _merge_dicts(DEFAULT_PROJECT_POLICY, monitor_config.get("defaults", {}))
+    policy_config = monitor_config.get("policy", {})
+    if not policy_config.get("allow_project_file", False):
+        return defaults
+
     policy_path = os.path.join(project_path, ".ore-monitor.yml")
     if not os.path.exists(policy_path):
         return defaults
 
     with open(policy_path, "r", encoding="utf-8") as handle:
         loaded = yaml.safe_load(handle) or {}
+
+    if not policy_config.get("allow_project_suppressions", False):
+        loaded = {
+            key: value
+            for key, value in loaded.items()
+            if key not in PROJECT_SUPPRESSION_KEYS
+        }
 
     return _merge_dicts(defaults, loaded)
 

@@ -422,6 +422,25 @@ class SnapshotUpdater:
         self.paths = ensure_monitor_layout(repo_root)
         self.final_data_dir = os.path.join(self.repo_root, "collectors", "final-data")
 
+    def _record_refresh_result(self, result: Dict[str, object]) -> None:
+        """Persist refresh attempt metadata without treating failures as fresh data."""
+        timestamp = _utcnow()
+        self.state.set_agent_state("last_threat_refresh_attempt_at", timestamp)
+        self.state.set_agent_state(
+            "last_threat_refresh_status",
+            "success" if result.get("success") else "failed",
+        )
+        self.state.set_agent_state(
+            "last_threat_refresh_message",
+            str(result.get("message", "")),
+        )
+        if result.get("success"):
+            self.state.set_agent_state("last_threat_refresh_at", timestamp)
+            if result.get("version"):
+                self.state.set_agent_state("current_snapshot_version", result["version"])
+            if result.get("key_id"):
+                self.state.set_agent_state("current_snapshot_key_id", result["key_id"])
+
     def refresh_if_due(self, force: bool = False) -> Dict[str, object]:
         """Refresh threat data when the configured interval has elapsed."""
         interval_seconds = int(
@@ -451,6 +470,7 @@ class SnapshotUpdater:
                     "include_experimental_sources",
                     False,
                 ),
+                allow_unverified_live_collection=True,
             )
         else:
             result = {
@@ -458,15 +478,8 @@ class SnapshotUpdater:
                 "message": "No snapshot source configured and live fallback disabled",
             }
 
-        self.state.set_agent_state("last_threat_refresh_at", _utcnow())
-        self.state.set_agent_state(
-            "last_threat_refresh_status",
-            "success" if result.get("success") else "failed",
-        )
-        if result.get("success") and result.get("version"):
-            self.state.set_agent_state("current_snapshot_version", result["version"])
-        if result.get("success") and result.get("key_id"):
-            self.state.set_agent_state("current_snapshot_key_id", result["key_id"])
+        if not snapshot_source:
+            self._record_refresh_result(result)
         return result
 
     def _prepare_staged_snapshot(self, manifest: Dict, manifest_source: str) -> Tuple[str, str]:
@@ -554,9 +567,9 @@ class SnapshotUpdater:
                 public_key_path=public_key_path,
             )
         except Exception as exc:
-            self.state.set_agent_state("last_threat_refresh_at", _utcnow())
-            self.state.set_agent_state("last_threat_refresh_status", "failed")
-            return {"success": False, "message": str(exc)}
+            result = {"success": False, "message": str(exc)}
+            self._record_refresh_result(result)
+            return result
 
         try:
             staged_root, staged_final_dir = self._prepare_staged_snapshot(manifest, manifest_source)
@@ -567,9 +580,9 @@ class SnapshotUpdater:
                 channel_document=channel_document,
             )
         except Exception as exc:
-            self.state.set_agent_state("last_threat_refresh_at", _utcnow())
-            self.state.set_agent_state("last_threat_refresh_status", "failed")
-            return {"success": False, "message": f"Snapshot apply failed: {exc}"}
+            result = {"success": False, "message": f"Snapshot apply failed: {exc}"}
+            self._record_refresh_result(result)
+            return result
         finally:
             if "staged_root" in locals():
                 shutil.rmtree(staged_root, ignore_errors=True)
@@ -583,10 +596,5 @@ class SnapshotUpdater:
         if channel_document:
             result["channel"] = channel_document.get("channel")
             result["channel_version"] = channel_document.get("current_version")
-        self.state.set_agent_state("last_threat_refresh_at", _utcnow())
-        self.state.set_agent_state("last_threat_refresh_status", "success")
-        if result.get("version"):
-            self.state.set_agent_state("current_snapshot_version", result["version"])
-        if result.get("key_id"):
-            self.state.set_agent_state("current_snapshot_key_id", result["key_id"])
+        self._record_refresh_result(result)
         return result

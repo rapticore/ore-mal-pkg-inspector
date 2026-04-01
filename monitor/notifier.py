@@ -13,6 +13,13 @@ from typing import Dict
 
 
 logger = logging.getLogger(__name__)
+APPLE_NOTIFICATION_SCRIPT = (
+    "on run argv\n"
+    "set notificationTitle to item 1 of argv\n"
+    "set notificationMessage to item 2 of argv\n"
+    "display notification notificationMessage with title notificationTitle\n"
+    "end run"
+)
 
 
 class Notifier:
@@ -81,9 +88,8 @@ class Notifier:
     def _emit_desktop(self, title: str, message: str) -> None:
         """Send a desktop notification when possible."""
         if shutil.which("osascript"):
-            script = f'display notification "{message}" with title "{title}"'
             subprocess.run(
-                ["osascript", "-e", script],
+                ["osascript", "-e", APPLE_NOTIFICATION_SCRIPT, title, message],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

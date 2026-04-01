@@ -22,6 +22,24 @@ class PackagingMetadataTests(unittest.TestCase):
             project["scripts"]["ore-mal-pkg-inspector"],
             "malicious_package_scanner:main",
         )
+        self.assertEqual(
+            data["build-system"]["requires"],
+            ["setuptools==80.9.0", "wheel==0.45.1"],
+        )
+        self.assertEqual(
+            project["dependencies"],
+            [
+                "PyYAML==6.0.3",
+                "requests==2.33.1",
+                "beautifulsoup4==4.14.3",
+                "packaging==26.0",
+                "defusedxml==0.7.1",
+            ],
+        )
+        self.assertEqual(
+            data["tool"]["setuptools"]["package-data"]["scanners"],
+            ["affected_packages.yaml"],
+        )
 
 
 if __name__ == "__main__":

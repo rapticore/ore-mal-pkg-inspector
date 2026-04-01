@@ -11,7 +11,7 @@ import sys
 import logging
 import json
 import zipfile
-import tempfile
+import shutil
 from urllib.request import urlretrieve
 from urllib.error import URLError
 
@@ -40,6 +40,25 @@ ECOSYSTEMS = {
 }
 
 
+def _safe_extract_zip(zf, extract_dir):
+    """
+    Extract a ZIP file without allowing path traversal outside the destination directory.
+    """
+    base_dir = os.path.abspath(extract_dir)
+    for member in zf.infolist():
+        member_path = os.path.abspath(os.path.join(base_dir, member.filename))
+        if os.path.commonpath([base_dir, member_path]) != base_dir:
+            raise ValueError(f"Unsafe ZIP member path: {member.filename}")
+
+        if member.is_dir():
+            os.makedirs(member_path, exist_ok=True)
+            continue
+
+        os.makedirs(os.path.dirname(member_path), exist_ok=True)
+        with zf.open(member, 'r') as source, open(member_path, 'wb') as target:
+            shutil.copyfileobj(source, target)
+
+
 def download_ecosystem_data(ecosystem_osv_name, cache_dir):
     """
     Download and extract OSV data for an ecosystem
@@ -64,7 +83,7 @@ def download_ecosystem_data(ecosystem_osv_name, cache_dir):
         # Extract
         os.makedirs(extract_dir, exist_ok=True)
         with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(extract_dir)
+            _safe_extract_zip(zf, extract_dir)
 
         # Clean up zip file to save space
         os.remove(zip_path)
@@ -76,6 +95,9 @@ def download_ecosystem_data(ecosystem_osv_name, cache_dir):
         return None
     except zipfile.BadZipFile as e:
         logger.info("  Error extracting %s: %s", ecosystem_osv_name, e)
+        return None
+    except ValueError as e:
+        logger.info("  Unsafe archive for %s: %s", ecosystem_osv_name, e)
         return None
     except Exception as e:
         logger.info("  Unexpected error for %s: %s", ecosystem_osv_name, e)

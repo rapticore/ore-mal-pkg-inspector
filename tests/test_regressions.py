@@ -4,10 +4,12 @@ import os
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 import malicious_package_scanner as scanner
-from collectors import collect_osv, collect_socketdev, db as collector_db, utils
+from collectors import collect_openssf, collect_osv, collect_socketdev, db as collector_db, utils
+from scanner_engine import ScanResult
 from scanners import dependency_parsers, report_generator
 from scanners.malicious_checker import MaliciousPackageChecker
 
@@ -97,17 +99,110 @@ class ScannerRegressionTests(unittest.TestCase):
             [("requests", "2.32.0", "pypi"), ("flask", "", "pypi")],
         )
 
-    def test_ensure_threat_data_force_update_always_rebuilds(self):
+    def test_cli_defaults_to_existing_local_threat_data_only(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as temp_file:
+            temp_file.write("requests==2.32.0\n")
+            temp_path = temp_file.name
+
+        try:
+            with patch("malicious_package_scanner.run_scan") as run_scan:
+                run_scan.return_value = ScanResult(
+                    ecosystem="pypi",
+                    scanned_path=temp_path,
+                    requested_ecosystems=["pypi"],
+                    packages=[],
+                    malicious_packages=[],
+                    iocs=[],
+                    report_path=None,
+                    data_metadata={},
+                    exit_code=0,
+                    message="ok",
+                )
+                scanner.main(["--file", temp_path, "--ecosystem", "pypi", "--no-ioc"])
+        finally:
+            os.unlink(temp_path)
+
+        request = run_scan.call_args.args[0]
+        self.assertFalse(request.ensure_data)
+        self.assertFalse(request.allow_unverified_live_collection)
+
+    def test_cli_requires_explicit_flag_for_unverified_live_collection(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as temp_file:
+            temp_file.write("requests==2.32.0\n")
+            temp_path = temp_file.name
+
+        try:
+            with patch("malicious_package_scanner.run_scan") as run_scan:
+                run_scan.return_value = ScanResult(
+                    ecosystem="pypi",
+                    scanned_path=temp_path,
+                    requested_ecosystems=["pypi"],
+                    packages=[],
+                    malicious_packages=[],
+                    iocs=[],
+                    report_path=None,
+                    data_metadata={},
+                    exit_code=0,
+                    message="ok",
+                )
+                scanner.main(
+                    [
+                        "--file",
+                        temp_path,
+                        "--ecosystem",
+                        "pypi",
+                        "--no-ioc",
+                        "--allow-unverified-live-collection",
+                    ]
+                )
+        finally:
+            os.unlink(temp_path)
+
+        request = run_scan.call_args.args[0]
+        self.assertTrue(request.ensure_data)
+        self.assertTrue(request.allow_unverified_live_collection)
+
+    def test_ensure_threat_data_force_update_requires_explicit_live_opt_in(self):
         orchestrator = _import_orchestrator()
+        empty_statuses = {
+            ecosystem: {
+                "usable": False,
+                "data_status": "failed",
+                "sources_used": [],
+                "experimental_sources_used": [],
+                "metadata_ready": False,
+                "exists": False,
+            }
+            for ecosystem in ["npm", "pypi", "rubygems", "go", "maven", "cargo"]
+        }
 
         with patch.object(
             orchestrator,
             "collect_all_data",
             return_value={"success": True, "database_statuses": {}},
         ) as collect:
-            with patch.object(orchestrator, "check_databases_exist", return_value=True):
-                self.assertTrue(scanner.ensure_threat_data(force_update=True))
+            with patch.object(orchestrator, "get_database_statuses", return_value=empty_statuses):
+                summary = scanner.ensure_threat_data(force_update=True)
 
+        self.assertFalse(summary["success"])
+        self.assertTrue(summary["refresh_required"])
+        self.assertIn("explicit opt-in", summary["message"])
+        collect.assert_not_called()
+
+    def test_ensure_threat_data_force_update_collects_when_explicitly_opted_in(self):
+        orchestrator = _import_orchestrator()
+        with patch.object(
+            orchestrator,
+            "collect_all_data",
+            return_value={"success": True, "database_statuses": {}},
+        ) as collect:
+            summary = scanner.ensure_threat_data(
+                force_update=True,
+                allow_unverified_live_collection=True,
+            )
+
+        self.assertTrue(summary["success"])
+        self.assertTrue(summary["used_live_collection"])
         collect.assert_called_once_with(
             build_if_missing=False,
             include_experimental=False,
@@ -181,6 +276,25 @@ class ScannerRegressionTests(unittest.TestCase):
             orchestrator.resolve_sources(include_experimental=True),
             ["openssf", "osv", "phylum"],
         )
+
+    def test_build_databases_only_loads_successful_sources(self):
+        orchestrator = _import_orchestrator()
+
+        with patch.object(
+            orchestrator.build_unified_index,
+            "load_all_raw_data",
+            return_value=[],
+        ) as load_all_raw_data:
+            summary = orchestrator.build_databases(
+                selected_sources=["openssf", "osv"],
+                source_results={
+                    "openssf": {"success": False},
+                    "osv": {"success": True},
+                },
+            )
+
+        self.assertFalse(summary["success"])
+        load_all_raw_data.assert_called_once_with(["osv"])
 
     def test_pyproject_dependencies_are_parsed_from_real_pyproject_filename(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -312,6 +426,40 @@ class ScannerRegressionTests(unittest.TestCase):
             [(pkg["name"], pkg["version"]) for pkg in packages],
             [("litellm", "1.52.3"), ("fastapi", ""), ("openai", "")],
         )
+
+    def test_safe_zip_extract_rejects_path_traversal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            zip_path = os.path.join(temp_dir, "bad.zip")
+            extract_dir = os.path.join(temp_dir, "extract")
+            os.makedirs(extract_dir, exist_ok=True)
+            escape_target = os.path.join(temp_dir, "escape.txt")
+
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("../escape.txt", "owned")
+
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                with self.assertRaises(ValueError):
+                    collect_osv._safe_extract_zip(zf, extract_dir)
+
+            self.assertFalse(os.path.exists(escape_target))
+
+    def test_openssf_live_collection_requires_explicit_opt_in(self):
+        with patch.dict(os.environ, {}, clear=False):
+            with patch("collectors.collect_openssf.os.path.exists", return_value=False):
+                with patch("collectors.collect_openssf.subprocess.run") as mocked_run:
+                    result = collect_openssf.clone_or_update_repo()
+
+        self.assertIsNone(result)
+        mocked_run.assert_not_called()
+
+    def test_openssf_cached_repo_is_ignored_without_explicit_opt_in(self):
+        with patch.dict(os.environ, {}, clear=False):
+            with patch("collectors.collect_openssf.os.path.exists", return_value=True):
+                with patch("collectors.collect_openssf.subprocess.run") as mocked_run:
+                    result = collect_openssf.clone_or_update_repo()
+
+        self.assertIsNone(result)
+        mocked_run.assert_not_called()
 
     def test_cargo_lock_dependencies_are_parsed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
