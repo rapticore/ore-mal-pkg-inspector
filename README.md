@@ -1653,6 +1653,6 @@ This project was extracted from the [OreNPMGuard](https://github.com/rapticore/O
 - **[OreNPMGuard](https://github.com/rapticore/OreNPMGuard)** - Specialized Shai-Hulud npm scanner
 ---
 
-**Built with ❤️ for the open source community**
+**Built by Rapticore Security Research Team**
 
 *Protecting software supply chains, one scan at a time.*
