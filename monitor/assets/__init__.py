@@ -1,0 +1,1 @@
+"""Bundled OreWatch UI assets."""

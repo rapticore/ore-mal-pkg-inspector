@@ -60,7 +60,7 @@ ore-mal-pkg-inspector = "malicious_package_scanner:main"
 py-modules = ["logging_config", "malicious_package_scanner", "scanner_engine"]
 
 [tool.setuptools.packages.find]
-include = ["collectors", "monitor", "scanners"]
+include = ["collectors*", "monitor*", "scanners*"]
 
 [tool.setuptools.package-data]
 collectors = ["config.yaml"]

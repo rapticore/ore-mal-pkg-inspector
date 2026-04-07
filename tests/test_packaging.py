@@ -5,6 +5,7 @@ import tomllib
 import unittest
 
 import malicious_package_scanner
+from setuptools import find_packages
 
 
 class PackagingMetadataTests(unittest.TestCase):
@@ -48,6 +49,15 @@ class PackagingMetadataTests(unittest.TestCase):
             data["tool"]["setuptools"]["package-data"]["monitor"],
             ["assets/*.png"],
         )
+        self.assertEqual(
+            data["tool"]["setuptools"]["packages"]["find"]["include"],
+            ["collectors*", "monitor*", "scanners*"],
+        )
+        discovered_packages = find_packages(
+            where=str(repo_root),
+            include=data["tool"]["setuptools"]["packages"]["find"]["include"],
+        )
+        self.assertIn("monitor.assets", discovered_packages)
 
     def test_packaged_entrypoint_exposes_monitor_quickstart(self):
         stdout = io.StringIO()
