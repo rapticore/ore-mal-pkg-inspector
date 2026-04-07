@@ -14,15 +14,19 @@ A production-grade security tool for detecting malicious packages and supply cha
 # Videos 
 
 ## Installation 
+
 https://github.com/rapticore/ore-mal-pkg-inspector/issues/2#issue-4215016110
 
-## OreWatch and Cursor 
+## OreWatch and Cursor
+
 https://github.com/rapticore/ore-mal-pkg-inspector/issues/3#issue-4215017945
 
 ## OreWatch and CodeX
+
 https://github.com/rapticore/ore-mal-pkg-inspector/issues/4#issue-4215019385
 
 ## OreWatch and Claude-Code
+
 https://github.com/rapticore/ore-mal-pkg-inspector/issues/5#issue-4215021599
 
 
