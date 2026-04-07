@@ -171,6 +171,18 @@ If you want a shorter setup guide with copy-paste commands, use [docs/adoption-g
 
 ### Installation
 
+**Release install for end users:**
+
+```bash
+# Recommended isolated install for developers
+pipx install orewatch
+
+# macOS Homebrew tap
+brew install rapticore/tap/orewatch
+```
+
+**Source checkout for contributors:**
+
 ```bash
 # Clone the repository
 git clone https://github.com/rapticore/ore-mal-pkg-inspector.git
@@ -186,7 +198,7 @@ pip install .
 
 _Note: If local threat data is missing or stale, package scans stage a live-update candidate and only promote it after anomaly gates pass. If the candidate looks suspicious, OreWatch keeps the last-known-good dataset active._
 
-_Note: The commands above install the project from a source checkout. This is the current development and contributor path. See [Distribution](#distribution) for the recommended release model for end users and CI._
+_Note: The `pipx` and Homebrew commands above are the recommended end-user install paths. The source-checkout flow below them remains the development and contributor path. See [Distribution](#distribution) for the release model details._
 
 _Installed CLI:_ `orewatch`  
 _Compatibility alias:_ `ore-mal-pkg-inspector`
@@ -803,7 +815,13 @@ Why this is the best fit:
 - Document `pipx install orewatch` for local developer installs.
 - Document `pip install orewatch==<version>` for CI and pinned automation.
 
-**Recommended secondary channel:** add a Homebrew formula only after the PyPI package and console entry point are stable. Homebrew is a convenience layer, not the primary release artifact.
+**Available secondary channel:** the Homebrew tap is now live for macOS users who prefer Brew-managed installs:
+
+```bash
+brew install rapticore/tap/orewatch
+```
+
+Homebrew remains a convenience layer over the published PyPI release, not the primary release artifact.
 
 **Best option for contributors:** keep the current source-checkout flow:
 
