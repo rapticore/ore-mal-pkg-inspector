@@ -27,13 +27,18 @@ REMOTE_SHAI_HULUD_SHA256_ENV = "OREWATCH_SHAI_HULUD_YAML_SHA256"
 
 class MaliciousPackageChecker:
     """Checks packages against malicious package databases."""
-    
-    def __init__(self, collectors_dir: Optional[str] = None):
+
+    def __init__(
+        self,
+        collectors_dir: Optional[str] = None,
+        final_data_dir: Optional[str] = None,
+    ):
         """
         Initialize the checker.
 
         Args:
             collectors_dir: Path to collectors directory (defaults to relative path)
+            final_data_dir: Optional explicit final-data directory override
         """
         if collectors_dir is None:
             # Default to collectors directory relative to this file
@@ -41,11 +46,26 @@ class MaliciousPackageChecker:
             collectors_dir = os.path.join(script_dir, 'collectors')
 
         self.collectors_dir = collectors_dir
-        self.final_data_dir = os.path.join(collectors_dir, 'final-data')
+        self.final_data_dir = final_data_dir or os.path.join(collectors_dir, 'final-data')
         self._db_cache = {}  # Cache database connections per ecosystem
         self._shai_hulud_cache = None  # Cache for Shai-Hulud affected packages
         self._shai_hulud_loaded = False
         self.github_yaml_url = "https://raw.githubusercontent.com/rapticore/OreNPMGuard/main/affected_packages.yaml"
+
+    def close(self) -> None:
+        """Close cached SQLite connections."""
+        for conn in self._db_cache.values():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._db_cache = {}
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _get_db_connection(self, ecosystem: str):
         """
@@ -91,6 +111,15 @@ class MaliciousPackageChecker:
             Normalized version
         """
         return version.strip()
+
+    def _lookup_names_for_ecosystem(self, ecosystem: str, name: str) -> List[str]:
+        """Return lookup name variants for one ecosystem."""
+        candidates = [name]
+        if ecosystem == "rubygems":
+            alternate = name.replace("-", "_") if "-" in name else name.replace("_", "-")
+            if alternate != name:
+                candidates.append(alternate)
+        return candidates
     
     def _load_shai_hulud_packages(self) -> Dict[str, Set[str]]:
         """
@@ -308,8 +337,15 @@ class MaliciousPackageChecker:
                 if not pkg_name:
                     continue
 
-                # Use db.check_package for lookup
-                result = db.check_package(conn, pkg_name, pkg_version)
+                # RubyGems treats "-" and "_" interchangeably, so query both forms.
+                result = None
+                for candidate_name in self._lookup_names_for_ecosystem(ecosystem, pkg_name):
+                    result = db.check_package(conn, candidate_name, pkg_version)
+                    if result:
+                        if result.get('name') != pkg_name:
+                            result['matched_name'] = result.get('name')
+                            result['name'] = pkg_name
+                        break
                 if result:
                     result['ecosystem'] = ecosystem
                     # Preserve SARIF locations from input package
@@ -334,8 +370,9 @@ class MaliciousPackageChecker:
         return malicious_found
 
 
-def check_malicious_packages(packages: List[Dict[str, str]], ecosystem: str, 
+def check_malicious_packages(packages: List[Dict[str, str]], ecosystem: str,
                             collectors_dir: Optional[str] = None,
+                            final_data_dir: Optional[str] = None,
                             include_shai_hulud: bool = True) -> List[Dict]:
     """
     Convenience function to check packages.
@@ -344,10 +381,11 @@ def check_malicious_packages(packages: List[Dict[str, str]], ecosystem: str,
         packages: List of dicts with 'name' and optionally 'version'
         ecosystem: Ecosystem name (npm, pypi, etc.)
         collectors_dir: Optional path to collectors directory
+        final_data_dir: Optional explicit final-data directory override
         include_shai_hulud: Whether to also check against Shai-Hulud affected packages (npm only)
         
     Returns:
         List of malicious packages found
     """
-    checker = MaliciousPackageChecker(collectors_dir)
+    checker = MaliciousPackageChecker(collectors_dir, final_data_dir=final_data_dir)
     return checker.check_packages(packages, ecosystem, include_shai_hulud=include_shai_hulud)

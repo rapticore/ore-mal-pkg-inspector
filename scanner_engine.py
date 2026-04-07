@@ -6,10 +6,20 @@ Reusable scan engine for one-off CLI runs and background monitoring.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from collectors.live_update import build_candidate_summary
+from collectors.live_update import ensure_live_update_layout
+from collectors.live_update import evaluate_candidate
+from collectors.live_update import load_active_baseline
+from collectors.live_update import merge_live_update_config
+from collectors.live_update import persist_promotion_report
+from collectors.live_update import promote_candidate_directory
 from logging_config import get_logger
 from scanners import dependency_parsers
 from scanners import ecosystem_detector
@@ -21,7 +31,9 @@ from scanners.supported_files import ECOSYSTEM_PRIORITY, get_supported_files_for
 
 
 logger = get_logger(__name__)
-ALLOW_UNVERIFIED_LIVE_COLLECTION_ENV = "OREWATCH_ALLOW_UNVERIFIED_LIVE_COLLECTION"
+REFRESH_MODE_EXISTING_ONLY = "existing_only"
+REFRESH_MODE_LIVE_GATED_IF_NEEDED = "live_gated_if_needed"
+REFRESH_MODE_LIVE_GATED_FORCE = "live_gated_force"
 
 
 @dataclass
@@ -38,7 +50,7 @@ class ScanRequest:
     strict_data: bool = False
     include_experimental_sources: bool = False
     ensure_data: bool = True
-    allow_unverified_live_collection: bool = False
+    refresh_mode: str = REFRESH_MODE_LIVE_GATED_IF_NEEDED
     print_summary: bool = True
 
 
@@ -150,6 +162,20 @@ def summarize_requested_data_status(
         "usable_ecosystems": usable_ecosystems,
         "requested_statuses": requested_statuses,
     }
+
+
+def _augment_data_metadata(
+    data_metadata: Dict[str, object],
+    threat_data_summary: Dict[str, object],
+) -> Dict[str, object]:
+    """Attach live-refresh promotion metadata to report-facing data metadata."""
+    enriched = dict(data_metadata)
+    enriched["promotion_decision"] = threat_data_summary.get("promotion_decision", "")
+    enriched["kept_last_known_good"] = bool(
+        threat_data_summary.get("kept_last_known_good", False)
+    )
+    enriched["anomalies"] = threat_data_summary.get("anomalies", [])
+    return enriched
 
 
 def aggregate_package_locations(packages: List[Dict], scanned_path: str) -> List[Dict]:
@@ -311,101 +337,327 @@ def _load_orchestrator_helpers():
         sys.path.insert(0, collectors_dir)
 
     from orchestrator import collect_all_data
+    from orchestrator import EXPECTED_ECOSYSTEMS
+    from orchestrator import SOURCE_DEFINITIONS
+    from orchestrator import build_databases
     from orchestrator import databases_need_refresh
     from orchestrator import get_database_statuses
+    from orchestrator import run_all_collectors
     from orchestrator import resolve_sources
 
-    return collect_all_data, databases_need_refresh, get_database_statuses, resolve_sources
+    return (
+        collect_all_data,
+        build_databases,
+        databases_need_refresh,
+        get_database_statuses,
+        resolve_sources,
+        run_all_collectors,
+        EXPECTED_ECOSYSTEMS,
+        SOURCE_DEFINITIONS,
+    )
+
+
+def _load_live_update_runtime():
+    """Return the live-update state directory and effective config."""
+    from monitor.config import ensure_monitor_layout
+    from monitor.config import load_monitor_config
+
+    paths = ensure_monitor_layout()
+    config = load_monitor_config()
+    promotion_root = os.path.join(paths["snapshots"], "live-updates")
+    return (
+        promotion_root,
+        merge_live_update_config(config.get("live_updates", {})),
+        paths["final_data_dir"],
+    )
+
+
+def _format_anomaly_summary(anomalies: List[Dict[str, object]]) -> str:
+    if not anomalies:
+        return ""
+    top = anomalies[0]
+    if len(anomalies) == 1:
+        return str(top.get("message", "anomaly detected"))
+    return f"{top.get('message', 'anomaly detected')} (+{len(anomalies) - 1} more)"
+
+
+def _perform_gated_live_refresh(
+    include_experimental_sources: bool,
+    promotion_root: str,
+    live_updates_config: Dict[str, object],
+    active_final_data_dir: Optional[str] = None,
+) -> Dict[str, object]:
+    """Collect live threat data into a candidate set and promote it only if gates pass."""
+    (
+        _collect_all_data,
+        build_databases,
+        _databases_need_refresh,
+        get_database_statuses,
+        resolve_sources,
+        run_all_collectors,
+        expected_ecosystems,
+        source_definitions,
+    ) = _load_orchestrator_helpers()
+
+    live_updates_config = merge_live_update_config(live_updates_config)
+    layout = ensure_live_update_layout(promotion_root)
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    attempt_id = (
+        f"{timestamp.replace(':', '').replace('-', '')}-{os.getpid()}-{os.urandom(4).hex()}"
+    )
+    selected_sources = resolve_sources(include_experimental=include_experimental_sources)
+    candidate_raw_dir = tempfile.mkdtemp(prefix="candidate-raw-", dir=layout["staging"])
+    candidate_final_dir = tempfile.mkdtemp(prefix="candidate-final-", dir=layout["staging"])
+    if active_final_data_dir is None:
+        _runtime_promotion_root, _runtime_live_updates_config, active_final_data_dir = (
+            _load_live_update_runtime()
+        )
+
+    try:
+        collector_results = run_all_collectors(
+            sources=selected_sources,
+            include_experimental=include_experimental_sources,
+            raw_data_dir=candidate_raw_dir,
+        )
+        build_summary = build_databases(
+            selected_sources=selected_sources,
+            source_results=collector_results,
+            raw_data_dir=candidate_raw_dir,
+            final_data_dir=candidate_final_dir,
+        )
+        candidate_summary, candidate_names = build_candidate_summary(
+            attempt_id,
+            selected_sources,
+            collector_results,
+            build_summary,
+            candidate_final_dir,
+            expected_ecosystems,
+            get_database_statuses,
+        )
+        current_summary, active_summary, active_names, active_source_counts = load_active_baseline(
+            promotion_root,
+            active_final_data_dir,
+            expected_ecosystems,
+            get_database_statuses,
+        )
+        report = evaluate_candidate(
+            attempt_id=attempt_id,
+            timestamp=timestamp,
+            selected_sources=selected_sources,
+            source_definitions=source_definitions,
+            candidate_summary=candidate_summary,
+            active_summary=active_summary,
+            candidate_names=candidate_names,
+            active_names=active_names,
+            active_source_counts=active_source_counts,
+            live_update_config=live_updates_config,
+        )
+
+        live_dataset_version = f"{timestamp.replace(':', '').replace('-', '')}-{attempt_id}"
+        report["live_dataset_version"] = live_dataset_version
+        report["active_summary_path"] = layout["current_summary"] if os.path.exists(layout["current_summary"]) else ""
+        report_path = ""
+
+        active_database_statuses = get_database_statuses(final_data_dir=active_final_data_dir)
+        if report["decision"] in {"promoted", "bootstrapped"}:
+            try:
+                backup_dir = promote_candidate_directory(
+                    active_final_data_dir,
+                    candidate_final_dir,
+                    promotion_root,
+                    live_dataset_version,
+                )
+            except Exception as exc:
+                report["decision"] = "rejected"
+                report["kept_last_known_good"] = True
+                report["message"] = (
+                    "Live threat-data promotion failed; kept last-known-good data. "
+                    f"{exc}"
+                )
+                report["anomalies"].append(
+                    {
+                        "severity": "block",
+                        "code": "promotion_failed",
+                        "scope": "global",
+                        "name": "promotion",
+                        "message": str(exc),
+                    }
+                )
+                report_path = persist_promotion_report(promotion_root, report, live_updates_config)
+                return {
+                    "success": any(status.get("usable") for status in active_database_statuses.values()),
+                    "database_statuses": active_database_statuses,
+                    "selected_sources": selected_sources,
+                    "used_live_collection": True,
+                    "refresh_required": False,
+                    "promotion_decision": "rejected",
+                    "kept_last_known_good": True,
+                    "anomalies": report["anomalies"],
+                    "candidate_summary_path": report_path,
+                    "active_summary_path": layout["current_summary"] if os.path.exists(layout["current_summary"]) else "",
+                    "live_dataset_version": current_summary.get("live_dataset_version", "") if current_summary else "",
+                    "message": report["message"],
+                }
+            if backup_dir:
+                report["backup_dir"] = backup_dir
+            report_path = persist_promotion_report(promotion_root, report, live_updates_config)
+            report["candidate_summary_path"] = report_path
+            report["active_summary_path"] = layout["current_summary"]
+            database_statuses = get_database_statuses(final_data_dir=active_final_data_dir)
+            message = report["message"]
+            if report["anomalies"]:
+                message = f"{message}. {_format_anomaly_summary(report['anomalies'])}"
+            return {
+                "success": any(status.get("usable") for status in database_statuses.values()),
+                "database_statuses": database_statuses,
+                "selected_sources": selected_sources,
+                "used_live_collection": True,
+                "refresh_required": False,
+                "promotion_decision": report["decision"],
+                "kept_last_known_good": False,
+                "anomalies": report["anomalies"],
+                "candidate_summary_path": report_path,
+                "active_summary_path": layout["current_summary"],
+                "live_dataset_version": live_dataset_version,
+                "message": message,
+            }
+
+        shutil.rmtree(candidate_final_dir, ignore_errors=True)
+        report_path = persist_promotion_report(promotion_root, report, live_updates_config)
+        has_active_baseline = any(status.get("usable") for status in active_database_statuses.values())
+        message = report["message"]
+        if report["anomalies"]:
+            message = f"{message}. {_format_anomaly_summary(report['anomalies'])}"
+        return {
+            "success": has_active_baseline and report.get("kept_last_known_good", False),
+            "database_statuses": active_database_statuses,
+            "selected_sources": selected_sources,
+            "used_live_collection": True,
+            "refresh_required": not has_active_baseline,
+            "promotion_decision": report["decision"],
+            "kept_last_known_good": report.get("kept_last_known_good", False),
+            "anomalies": report["anomalies"],
+            "candidate_summary_path": report_path,
+            "active_summary_path": layout["current_summary"] if os.path.exists(layout["current_summary"]) else "",
+            "live_dataset_version": current_summary.get("live_dataset_version", "") if current_summary else "",
+            "message": message,
+        }
+    finally:
+        shutil.rmtree(candidate_raw_dir, ignore_errors=True)
+        if os.path.exists(candidate_final_dir):
+            shutil.rmtree(candidate_final_dir, ignore_errors=True)
 
 
 def ensure_threat_data(
     force_update: bool = False,
     include_experimental_sources: bool = False,
-    allow_unverified_live_collection: bool = False,
+    live_updates_config: Optional[Dict[str, object]] = None,
+    promotion_root: Optional[str] = None,
+    final_data_dir: Optional[str] = None,
 ) -> Dict[str, object]:
     """
     Ensure threat-intelligence databases exist and are fresh enough.
     """
-    collect_all_data, databases_need_refresh, get_database_statuses, resolve_sources = (
-        _load_orchestrator_helpers()
+    (
+        _collect_all_data,
+        _build_databases,
+        databases_need_refresh,
+        get_database_statuses,
+        resolve_sources,
+        _run_all_collectors,
+        _expected_ecosystems,
+        _source_definitions,
+    ) = _load_orchestrator_helpers()
+    runtime_promotion_root, runtime_live_updates_config, runtime_final_data_dir = (
+        _load_live_update_runtime()
     )
-    database_statuses = get_database_statuses()
+    final_data_dir = final_data_dir or runtime_final_data_dir
+    database_statuses = get_database_statuses(final_data_dir=final_data_dir)
     current_summary = {
         "success": any(status.get("usable") for status in database_statuses.values()),
         "database_statuses": database_statuses,
         "selected_sources": resolve_sources(
             include_experimental=include_experimental_sources
         ),
+        "refresh_required": databases_need_refresh(
+            include_experimental=include_experimental_sources,
+            final_data_dir=final_data_dir,
+        ),
         "used_live_collection": False,
+        "promotion_decision": "",
+        "kept_last_known_good": False,
+        "anomalies": [],
     }
-    allow_live_collection = allow_unverified_live_collection or (
-        os.environ.get(ALLOW_UNVERIFIED_LIVE_COLLECTION_ENV) == "1"
-    )
 
-    if force_update:
-        if not allow_live_collection:
-            current_summary["message"] = (
-                "Threat data refresh requires signed snapshots or explicit opt-in to "
-                "unverified live collection via --allow-unverified-live-collection "
-                f"or {ALLOW_UNVERIFIED_LIVE_COLLECTION_ENV}=1"
-            )
-            current_summary["refresh_required"] = True
-            logger.warning(current_summary["message"])
-            return current_summary
-        print("=" * 60)
-        print("Collecting latest threat intelligence data...")
-        print("This may take 10-15 minutes depending on network speed.")
-        print("=" * 60)
-        print()
-    elif not databases_need_refresh(include_experimental=include_experimental_sources):
+    if not force_update and not current_summary["refresh_required"]:
         logger.debug("Threat intelligence databases found")
         return current_summary
+
+    promotion_root = promotion_root or runtime_promotion_root
+    effective_live_updates_config = live_updates_config or runtime_live_updates_config
+
+    if not effective_live_updates_config.get("enabled", True):
+        current_summary["message"] = (
+            "Live threat-data updates are disabled and no signed snapshot refresh was configured"
+        )
+        return current_summary
+
+    print("=" * 60)
+    if force_update:
+        print("Collecting latest threat intelligence data...")
+        print("Evaluating anomaly gates before promotion.")
+        print("This may take 10-15 minutes depending on network speed.")
     else:
-        if not allow_live_collection:
-            current_summary["message"] = (
-                "Threat data is missing or outdated. Apply a signed snapshot or rerun "
-                "with --latest-data --allow-unverified-live-collection to opt in to "
-                "unverified live collector refresh."
-            )
-            current_summary["refresh_required"] = True
-            logger.warning(current_summary["message"])
-            return current_summary
-        print("=" * 60)
         print("Threat intelligence databases are missing or need refresh.")
         print("Collecting data from security sources...")
+        print("Evaluating anomaly gates before promotion.")
         print("This may take 10-15 minutes (first run only).")
-        print("=" * 60)
-        print()
+    print("=" * 60)
+    print()
 
-    summary = collect_all_data(
-        build_if_missing=not force_update,
-        include_experimental=include_experimental_sources,
+    summary = _perform_gated_live_refresh(
+        include_experimental_sources=include_experimental_sources,
+        promotion_root=promotion_root,
+        live_updates_config=effective_live_updates_config,
+        active_final_data_dir=final_data_dir,
     )
-    summary["used_live_collection"] = True
 
     if summary.get("success"):
         print()
-        print("✓ Threat data collection completed successfully")
+        print("✓ Threat data refresh completed")
         print("=" * 60)
         print()
         return summary
 
     print()
-    print("⚠ WARNING: Threat data collection failed")
-    print("Using currently available local threat data only.")
+    print("⚠ WARNING: Threat data refresh failed")
+    print(summary.get("message", "No usable threat data available"))
     print("=" * 60)
     print()
-    logger.warning("Live collection failed; using current local threat data only")
-    summary["message"] = "Unverified live threat-data collection failed"
+    logger.warning("Live refresh failed or was rejected: %s", summary.get("message", ""))
     return summary
 
 
 def get_current_threat_data_summary(
     include_experimental_sources: bool = False,
+    final_data_dir: Optional[str] = None,
 ) -> Dict[str, object]:
     """Return current threat-data statuses without forcing collection."""
-    _, databases_need_refresh, get_database_statuses, resolve_sources = _load_orchestrator_helpers()
-    database_statuses = get_database_statuses()
+    (
+        _collect_all_data,
+        _build_databases,
+        databases_need_refresh,
+        get_database_statuses,
+        resolve_sources,
+        _run_all_collectors,
+        _expected_ecosystems,
+        _source_definitions,
+    ) = _load_orchestrator_helpers()
+    _runtime_promotion_root, _runtime_live_updates_config, runtime_final_data_dir = (
+        _load_live_update_runtime()
+    )
+    final_data_dir = final_data_dir or runtime_final_data_dir
+    database_statuses = get_database_statuses(final_data_dir=final_data_dir)
     return {
         "success": any(status.get("usable") for status in database_statuses.values()),
         "database_statuses": database_statuses,
@@ -413,9 +665,13 @@ def get_current_threat_data_summary(
             include_experimental=include_experimental_sources
         ),
         "refresh_required": databases_need_refresh(
-            include_experimental=include_experimental_sources
+            include_experimental=include_experimental_sources,
+            final_data_dir=final_data_dir,
         ),
         "used_live_collection": False,
+        "promotion_decision": "",
+        "kept_last_known_good": False,
+        "anomalies": [],
     }
 
 
@@ -548,17 +804,25 @@ def run_scan(request: ScanRequest) -> ScanResult:
         "database_statuses": {},
         "selected_sources": [],
     }
+    runtime_final_data_dir: Optional[str] = None
 
     if request.scan_packages:
-        if request.ensure_data:
-            threat_data_summary = ensure_threat_data(
-                force_update=request.force_latest_data,
+        _runtime_promotion_root, _runtime_live_updates_config, runtime_final_data_dir = (
+            _load_live_update_runtime()
+        )
+        if request.refresh_mode == REFRESH_MODE_EXISTING_ONLY or not request.ensure_data:
+            threat_data_summary = get_current_threat_data_summary(
                 include_experimental_sources=request.include_experimental_sources,
-                allow_unverified_live_collection=request.allow_unverified_live_collection,
+                final_data_dir=runtime_final_data_dir,
             )
         else:
-            threat_data_summary = get_current_threat_data_summary(
-                include_experimental_sources=request.include_experimental_sources
+            threat_data_summary = ensure_threat_data(
+                force_update=(
+                    request.force_latest_data
+                    or request.refresh_mode == REFRESH_MODE_LIVE_GATED_FORCE
+                ),
+                include_experimental_sources=request.include_experimental_sources,
+                final_data_dir=runtime_final_data_dir,
             )
 
     if request.force_latest_data:
@@ -670,6 +934,7 @@ def run_scan(request: ScanRequest) -> ScanResult:
         requested_ecosystems,
         threat_data_summary.get("database_statuses"),
     )
+    data_metadata = _augment_data_metadata(data_metadata, threat_data_summary)
 
     if request.scan_packages and requested_ecosystems:
         if request.strict_data and data_metadata["data_status"] != "complete":
@@ -760,6 +1025,7 @@ def run_scan(request: ScanRequest) -> ScanResult:
                     malicious = malicious_checker.check_malicious_packages(
                         eco_packages,
                         eco,
+                        final_data_dir=runtime_final_data_dir,
                         include_shai_hulud=True,
                     )
                     malicious_packages.extend(malicious)
@@ -774,6 +1040,7 @@ def run_scan(request: ScanRequest) -> ScanResult:
                 malicious_packages = malicious_checker.check_malicious_packages(
                     packages,
                     ecosystem,
+                    final_data_dir=runtime_final_data_dir,
                     include_shai_hulud=True,
                 )
     else:

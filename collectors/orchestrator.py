@@ -108,7 +108,7 @@ def resolve_sources(
     return selected
 
 
-def _get_directories():
+def _get_directories(raw_data_dir: Optional[str] = None, final_data_dir: Optional[str] = None):
     """
     Get the raw-data and final-data directories.
     
@@ -116,8 +116,8 @@ def _get_directories():
         Tuple of (raw_data_dir, final_data_dir)
     """
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    raw_data_dir = os.path.join(script_dir, 'raw-data')
-    final_data_dir = os.path.join(script_dir, 'final-data')
+    raw_data_dir = raw_data_dir or os.path.join(script_dir, 'raw-data')
+    final_data_dir = final_data_dir or os.path.join(script_dir, 'final-data')
     
     # Create directories if they don't exist
     os.makedirs(raw_data_dir, exist_ok=True)
@@ -126,7 +126,11 @@ def _get_directories():
     return raw_data_dir, final_data_dir
 
 
-def run_collector(source_key: str, collector_config: Dict[str, Any]) -> Dict[str, Any]:
+def run_collector(
+    source_key: str,
+    collector_config: Dict[str, Any],
+    raw_data_dir: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Run a single collector and save its data.
     
@@ -144,7 +148,7 @@ def run_collector(source_key: str, collector_config: Dict[str, Any]) -> Dict[str
     print(f"Running {name}")
     print('='*60)
     
-    raw_data_dir, _ = _get_directories()
+    raw_data_dir, _ = _get_directories(raw_data_dir=raw_data_dir)
     output_path = os.path.join(raw_data_dir, output_filename)
     result = {
         'source': source_key,
@@ -210,6 +214,7 @@ def run_collector(source_key: str, collector_config: Dict[str, Any]) -> Dict[str
 def run_all_collectors(
     sources: Optional[List[str]] = None,
     include_experimental: bool = False,
+    raw_data_dir: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Run all or selected collectors.
@@ -228,19 +233,23 @@ def run_all_collectors(
     results = {}
     for source_key in selected_sources:
         collector = SOURCE_DEFINITIONS[source_key]
-        results[source_key] = run_collector(source_key, collector)
+        results[source_key] = run_collector(
+            source_key,
+            collector,
+            raw_data_dir=raw_data_dir,
+        )
     
     return results
 
 
-def check_databases_exist() -> bool:
+def check_databases_exist(final_data_dir: Optional[str] = None) -> bool:
     """
     Check if all expected SQLite database files exist.
     
     Returns:
         True if all database files exist, False otherwise
     """
-    _, final_data_dir = _get_directories()
+    _, final_data_dir = _get_directories(final_data_dir=final_data_dir)
     ecosystems = ['npm', 'pypi', 'rubygems', 'go', 'maven', 'cargo']
     
     return all(
@@ -249,7 +258,10 @@ def check_databases_exist() -> bool:
     )
 
 
-def get_database_statuses(ecosystems: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
+def get_database_statuses(
+    ecosystems: Optional[List[str]] = None,
+    final_data_dir: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
     """
     Inspect database files and return per-ecosystem availability metadata.
 
@@ -259,7 +271,7 @@ def get_database_statuses(ecosystems: Optional[List[str]] = None) -> Dict[str, D
     Returns:
         Mapping of ecosystem to status dict
     """
-    _, final_data_dir = _get_directories()
+    _, final_data_dir = _get_directories(final_data_dir=final_data_dir)
     target_ecosystems = ecosystems or EXPECTED_ECOSYSTEMS
     statuses: Dict[str, Dict[str, Any]] = {}
 
@@ -305,7 +317,10 @@ def get_database_statuses(ecosystems: Optional[List[str]] = None) -> Dict[str, D
     return statuses
 
 
-def databases_need_refresh(include_experimental: bool = False) -> bool:
+def databases_need_refresh(
+    include_experimental: bool = False,
+    final_data_dir: Optional[str] = None,
+) -> bool:
     """
     Determine whether databases should be rebuilt for the requested source tier set.
 
@@ -315,7 +330,7 @@ def databases_need_refresh(include_experimental: bool = False) -> bool:
     Returns:
         True when databases are missing, lack metadata, or reflect the wrong source tier set
     """
-    statuses = get_database_statuses()
+    statuses = get_database_statuses(final_data_dir=final_data_dir)
     if not all(status['exists'] for status in statuses.values()):
         return True
 
@@ -381,6 +396,8 @@ def _calculate_ecosystem_metadata(
 def build_databases(
     selected_sources: Optional[List[str]] = None,
     source_results: Optional[Dict[str, Dict[str, Any]]] = None,
+    raw_data_dir: Optional[str] = None,
+    final_data_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build unified SQLite databases from raw data.
@@ -405,7 +422,10 @@ def build_databases(
     try:
         # Load all raw data
         print("\nLoading raw data files...")
-        raw_data_list = build_unified_index.load_all_raw_data(effective_sources)
+        raw_data_list = build_unified_index.load_all_raw_data(
+            effective_sources,
+            raw_data_dir=raw_data_dir,
+        )
         
         if not raw_data_list:
             print("⚠ No raw data files found")
@@ -441,6 +461,7 @@ def build_databases(
                 packages,
                 metadata=metadata,
                 timestamp=timestamp,
+                output_dir=final_data_dir,
             )
             build_results[ecosystem] = build_success
             if build_success:
@@ -450,7 +471,7 @@ def build_databases(
                 logger.info("✗ %s: Failed to build", ecosystem)
 
         logger.info("\n✓ Built databases with %s total packages", total_packages)
-        database_statuses = get_database_statuses()
+        database_statuses = get_database_statuses(final_data_dir=final_data_dir)
         return {
             'success': all(build_results.values()),
             'database_statuses': database_statuses,
@@ -463,7 +484,7 @@ def build_databases(
         traceback.print_exc()
         return {
             'success': False,
-            'database_statuses': get_database_statuses(),
+            'database_statuses': get_database_statuses(final_data_dir=final_data_dir),
             'build_results': {},
         }
 
@@ -473,6 +494,8 @@ def collect_all_data(
     skip_build: bool = False,
     build_if_missing: bool = False,
     include_experimental: bool = False,
+    raw_data_dir: Optional[str] = None,
+    final_data_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Main function to collect data from all sources and build unified databases.
@@ -497,10 +520,13 @@ def collect_all_data(
     print("="*60)
     selected_sources = resolve_sources(sources, include_experimental=include_experimental)
 
-    if build_if_missing and not databases_need_refresh(include_experimental=include_experimental):
+    if build_if_missing and not databases_need_refresh(
+        include_experimental=include_experimental,
+        final_data_dir=final_data_dir,
+    ):
         logger.info("\nDatabases already exist (build_if_missing=True)")
         print("Skipping collection and database build")
-        database_statuses = get_database_statuses()
+        database_statuses = get_database_statuses(final_data_dir=final_data_dir)
         complete_ecosystems = [
             eco for eco, status in database_statuses.items()
             if status.get('data_status') == 'complete'
@@ -524,7 +550,11 @@ def collect_all_data(
         }
     
     # Run collectors
-    collector_results = run_all_collectors(sources, include_experimental=include_experimental)
+    collector_results = run_all_collectors(
+        sources,
+        include_experimental=include_experimental,
+        raw_data_dir=raw_data_dir,
+    )
     
     # Print collector summary
     logger.info("\n%s", '='*60)
@@ -543,16 +573,26 @@ def collect_all_data(
     if build_if_missing:
         print("\nDatabases missing or outdated (build_if_missing=True)")
         print("Building databases...")
-        build_summary = build_databases(selected_sources, collector_results)
+        build_summary = build_databases(
+            selected_sources,
+            collector_results,
+            raw_data_dir=raw_data_dir,
+            final_data_dir=final_data_dir,
+        )
     elif not skip_build:
         # Always build (default behavior)
-        build_summary = build_databases(selected_sources, collector_results)
+        build_summary = build_databases(
+            selected_sources,
+            collector_results,
+            raw_data_dir=raw_data_dir,
+            final_data_dir=final_data_dir,
+        )
     else:
         # Never build (skip_build=True)
         print("\nSkipping database build (skip_build=True)")
         build_summary = {
             'success': True,
-            'database_statuses': get_database_statuses(),
+            'database_statuses': get_database_statuses(final_data_dir=final_data_dir),
             'build_results': {},
         }
 

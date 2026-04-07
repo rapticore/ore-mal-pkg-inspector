@@ -58,8 +58,11 @@ ore-mal-pkg-inspector/
 │   └── report_generator.py
 │
 ├── monitor/
+│   ├── api.py
 │   ├── cli.py
 │   ├── config.py
+│   ├── integration_matrix.py
+│   ├── mcp_adapter.py
 │   ├── notifier.py
 │   ├── policy.py
 │   ├── scheduler.py
@@ -70,6 +73,7 @@ ore-mal-pkg-inspector/
 │
 └── tests/
     ├── fixtures/manifests/
+    ├── test_client_e2e.py
     ├── test_manifest_fixtures.py
     ├── test_monitor.py
     └── test_regressions.py
@@ -99,9 +103,15 @@ Before package checking, the scanner calls `ensure_threat_data()`.
 Current behavior:
 
 - if `--ioc-only` is set, package threat-data setup is skipped
-- if `--latest-data` is set, collection and rebuild always run
-- otherwise, the scanner reuses local databases only if every expected ecosystem has usable metadata
+- if `--latest-data` is set, OreWatch forces a staged live refresh and anomaly-gated promotion
+- otherwise, the scanner reuses local databases only if every expected ecosystem has usable metadata, and performs a gated live refresh only when the local baseline is missing or stale
 - stale or pre-metadata databases are treated as needing refresh
+
+Refresh modes are represented explicitly on `ScanRequest`:
+
+- `existing_only`
+- `live_gated_if_needed`
+- `live_gated_force`
 
 The scanner derives per-request data status for the requested ecosystems:
 
@@ -185,6 +195,9 @@ Top-level threat-data fields include:
 - `sources_used`
 - `experimental_sources_used`
 - `missing_ecosystems`
+- `promotion_decision`
+- `kept_last_known_good`
+- `anomalies`
 
 ## Background Monitor
 
@@ -193,12 +206,15 @@ The background monitor uses the same scan engine as the foreground CLI.
 ### Runtime components
 
 - `monitor/service.py` runs the long-lived process
+- `monitor/api.py` provides the localhost-only HTTP surface for agents and IDE clients
 - `monitor/state.py` stores watched projects, findings, notifications, and watcher snapshots
+- `monitor/state.py` also stores dependency-check audit records and explicit one-time overrides
 - `monitor/watcher.py` polls supported manifests plus IoC-sensitive files
 - `monitor/scheduler.py` handles debounced file changes and periodic scan cadence
 - `monitor/notifier.py` records notifications and emits desktop notifications when available
-- `monitor/snapshot_updater.py` refreshes threat data from signed manifests or signed channel descriptors, or falls back to live collection
-- `monitor/cli.py` exposes install, uninstall, start, stop, restart, status, watch, scan-now, and snapshot commands
+- `monitor/snapshot_updater.py` refreshes threat data from signed manifests or signed channel descriptors, or from anomaly-gated live collection when no signed source is configured
+- `monitor/mcp_adapter.py` exposes the localhost API as MCP tools for Claude Code and Codex
+- `monitor/cli.py` exposes install, uninstall, start, stop, restart, status, watch, scan-now, snapshot, `connection-info`, and `mcp` commands
 
 ### Runtime data
 
@@ -221,6 +237,33 @@ The monitor supports three runtime modes:
 
 The CLI writes repo-local templates first, then installs user-scoped service definitions when the selected manager supports it.
 
+### Local integration API
+
+When enabled, the monitor starts a localhost-only HTTP API on `127.0.0.1:48736` by default.
+
+- discovery happens through `orewatch monitor connection-info`
+- authentication uses a per-user bearer token stored in the user-owned config directory
+- the API is intended for Claude Code, Codex, VS Code, JetBrains/PyCharm, and other local-only clients
+
+Current endpoints:
+
+- `GET /v1/health`
+- `POST /v1/check/dependency-add`
+- `POST /v1/check/manifest`
+- `POST /v1/checks/<check_id>/override`
+
+Dependency add checks are conservative by design:
+
+- `allow` only when threat data is complete, every dependency resolves to an exact version, and there are no malicious matches
+- `override_required` when threat data is partial/failed, an exact version cannot be determined, or a malicious match is found
+
+The MCP bridge in `monitor/mcp_adapter.py` maps that HTTP surface into four tools:
+
+- `orewatch_health`
+- `orewatch_check_dependency_add`
+- `orewatch_check_manifest`
+- `orewatch_override_dependency_add`
+
 ### Scan modes
 
 The monitor uses two scan modes:
@@ -240,7 +283,7 @@ Findings are fingerprinted and persisted so the monitor can distinguish:
 
 Notifications are emitted only for new or escalated findings by default, which avoids re-alerting developers on the same issue every cycle.
 
-### Snapshot distribution
+### Threat-data refresh
 
 `monitor/snapshot_updater.py` supports two hosted update shapes:
 
@@ -252,6 +295,16 @@ Published snapshots use a static-hosting-friendly layout with versioned assets u
 Snapshot signing uses an offline private key and OpenSSL-backed RSA SHA-256 signatures. Verification uses only the public key configured in the user-owned monitor config file.
 
 Snapshot application stages and validates all files before replacing `collectors/final-data/`, and it restores the previous directory if the final swap fails.
+
+Open-source/community installs default to anomaly-gated live refreshes from the upstream core feeds. Enterprise-managed installs can optionally replace that path with signed snapshots. In the live-refresh path:
+
+- collectors run into a temp raw-data directory
+- candidate SQLite DBs are built into a temp final-data directory
+- the candidate is summarized and compared to the current active baseline
+- anomaly gates block abnormal drops, unusable ecosystem regressions, empty ecosystems, and mass removals
+- core-source outages are warning-only by default; ecosystem-level regressions still decide promotion safety
+- accepted candidates are promoted atomically and the previous active DBs are archived as last-known-good
+- rejected candidates leave the active DBs untouched
 
 ## Threat Data Pipeline
 
@@ -268,7 +321,7 @@ The orchestrator defines sources in `SOURCE_DEFINITIONS` with a tier and default
 | `phylum` | experimental | no | Heuristic extraction from blog content |
 | `socketdev` | disabled | no | Placeholder only |
 
-Default refreshes use only the core sources. `--include-experimental` or `--include-experimental-sources` adds `phylum`. `socketdev` remains out of the default path.
+Default open-source refreshes use only the core sources directly. `--include-experimental` or `--include-experimental-sources` adds `phylum`. `socketdev` remains out of the default path.
 
 ### Raw-data stage
 

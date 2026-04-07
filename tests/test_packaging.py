@@ -1,6 +1,10 @@
+import contextlib
+import io
 import pathlib
 import tomllib
 import unittest
+
+import malicious_package_scanner
 
 
 class PackagingMetadataTests(unittest.TestCase):
@@ -24,7 +28,7 @@ class PackagingMetadataTests(unittest.TestCase):
         )
         self.assertEqual(
             data["build-system"]["requires"],
-            ["setuptools==80.9.0", "wheel==0.45.1"],
+            ["setuptools>=80", "wheel>=0.45"],
         )
         self.assertEqual(
             project["dependencies"],
@@ -40,6 +44,22 @@ class PackagingMetadataTests(unittest.TestCase):
             data["tool"]["setuptools"]["package-data"]["scanners"],
             ["affected_packages.yaml"],
         )
+        self.assertEqual(
+            data["tool"]["setuptools"]["package-data"]["monitor"],
+            ["assets/*.png"],
+        )
+
+    def test_packaged_entrypoint_exposes_monitor_quickstart(self):
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as context:
+            with contextlib.redirect_stdout(stdout):
+                malicious_package_scanner.main(["monitor", "quickstart", "--help"])
+
+        self.assertEqual(context.exception.code, 0)
+        output = stdout.getvalue()
+        self.assertIn("monitor quickstart", output)
+        self.assertIn("--client", output)
+        self.assertIn("--service-manager", output)
 
 
 if __name__ == "__main__":

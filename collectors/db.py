@@ -638,3 +638,18 @@ def get_metadata(conn: sqlite3.Connection) -> Dict[str, Any]:
             metadata[key] = value
 
     return metadata
+
+
+def list_package_names(conn: sqlite3.Connection) -> set[str]:
+    """
+    Return the normalized package names stored in one database.
+
+    Args:
+        conn: Database connection
+
+    Returns:
+        Set of normalized package names
+    """
+    cursor = conn.cursor()
+    cursor.execute('SELECT name_normalized FROM packages')
+    return {row[0] for row in cursor.fetchall()}

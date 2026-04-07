@@ -415,12 +415,19 @@ def publish_snapshot(
 class SnapshotUpdater:
     """Update local threat-data databases from snapshots or live collection."""
 
-    def __init__(self, repo_root: Optional[str], monitor_config: Dict, state):
-        self.repo_root = os.path.abspath(repo_root) if repo_root else None
+    def __init__(
+        self,
+        code_root: Optional[str],
+        final_data_dir: str,
+        monitor_config: Dict,
+        state,
+        paths: Optional[Dict[str, str]] = None,
+    ):
+        self.code_root = os.path.abspath(code_root) if code_root else None
         self.config = monitor_config
         self.state = state
-        self.paths = ensure_monitor_layout(repo_root)
-        self.final_data_dir = os.path.join(self.repo_root, "collectors", "final-data")
+        self.paths = paths or ensure_monitor_layout()
+        self.final_data_dir = os.path.abspath(final_data_dir)
 
     def _record_refresh_result(self, result: Dict[str, object]) -> None:
         """Persist refresh attempt metadata without treating failures as fresh data."""
@@ -434,6 +441,25 @@ class SnapshotUpdater:
             "last_threat_refresh_message",
             str(result.get("message", "")),
         )
+        self.state.set_agent_state(
+            "last_live_promotion_status",
+            "success" if result.get("success") else "failed",
+        )
+        self.state.set_agent_state(
+            "last_live_promotion_decision",
+            str(result.get("promotion_decision", "")),
+        )
+        self.state.set_agent_state(
+            "last_live_promotion_message",
+            str(result.get("message", "")),
+        )
+        if result.get("used_live_collection"):
+            self.state.set_agent_state("last_live_promotion_at", timestamp)
+        if result.get("live_dataset_version"):
+            self.state.set_agent_state(
+                "current_live_dataset_version",
+                str(result["live_dataset_version"]),
+            )
         if result.get("success"):
             self.state.set_agent_state("last_threat_refresh_at", timestamp)
             if result.get("version"):
@@ -459,23 +485,26 @@ class SnapshotUpdater:
                 }
 
         snapshots_config = self.config.get("snapshots", {})
+        live_updates_config = self.config.get("live_updates", {})
         snapshot_source = snapshots_config.get("channel_url") or snapshots_config.get("manifest_url")
         public_key_path = snapshots_config.get("public_key_path", "")
         if snapshot_source:
             result = self.apply_snapshot(snapshot_source, public_key_path=public_key_path)
-        elif snapshots_config.get("use_live_collection_fallback", True):
+        elif live_updates_config.get("enabled", True):
             result = ensure_threat_data(
                 force_update=True,
                 include_experimental_sources=self.config.get("defaults", {}).get(
                     "include_experimental_sources",
                     False,
                 ),
-                allow_unverified_live_collection=True,
+                live_updates_config=live_updates_config,
+                promotion_root=os.path.join(self.paths["snapshots"], "live-updates"),
+                final_data_dir=self.final_data_dir,
             )
         else:
             result = {
                 "success": False,
-                "message": "No snapshot source configured and live fallback disabled",
+                "message": "No snapshot source configured and live updates are disabled",
             }
 
         if not snapshot_source:

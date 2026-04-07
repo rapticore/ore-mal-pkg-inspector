@@ -1,4 +1,6 @@
+import contextlib
 import importlib
+import io
 import json
 import os
 import sys
@@ -8,8 +10,13 @@ import zipfile
 from unittest.mock import patch
 
 import malicious_package_scanner as scanner
+import scanner_engine as engine
 from collectors import collect_openssf, collect_osv, collect_socketdev, db as collector_db, utils
+from collectors.live_update import evaluate_candidate
 from scanner_engine import ScanResult
+from scanner_engine import REFRESH_MODE_EXISTING_ONLY
+from scanner_engine import REFRESH_MODE_LIVE_GATED_FORCE
+from scanner_engine import REFRESH_MODE_LIVE_GATED_IF_NEEDED
 from scanners import dependency_parsers, report_generator
 from scanners.malicious_checker import MaliciousPackageChecker
 
@@ -25,6 +32,38 @@ def _import_orchestrator():
 
 
 class ScannerRegressionTests(unittest.TestCase):
+    def _build_packages(self, names, source="osv"):
+        return [
+            {
+                "name": name,
+                "versions": ["1.0.0"],
+                "sources": [source],
+                "severity": "critical",
+                "description": f"Malicious package {name}",
+                "detected_behaviors": ["malicious_code"],
+            }
+            for name in names
+        ]
+
+    def _write_database(self, final_data_dir, ecosystem, packages, sources=None):
+        os.makedirs(final_data_dir, exist_ok=True)
+        db_path = os.path.join(final_data_dir, f"unified_{ecosystem}.db")
+        conn, temp_db_path = collector_db.create_database(db_path)
+        collector_db.insert_packages(conn, packages)
+        collector_db.insert_metadata(
+            conn,
+            ecosystem=ecosystem,
+            packages=packages,
+            timestamp="2026-04-02T00:00:00Z",
+            extra_metadata={
+                "data_status": "complete",
+                "sources_used": sources or ["openssf", "osv"],
+                "experimental_sources_used": [],
+                "last_successful_collect": "2026-04-02T00:00:00Z",
+            },
+        )
+        collector_db.finalize_database(conn, temp_db_path, db_path)
+
     def _create_temp_checker(self, temp_dir, ecosystem, packages):
         collectors_dir = os.path.join(temp_dir, "collectors")
         final_data_dir = os.path.join(collectors_dir, "final-data")
@@ -57,12 +96,14 @@ class ScannerRegressionTests(unittest.TestCase):
 
     def test_scan_directory_returns_four_tuple_when_ecosystem_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = scanner.scan_directory(temp_dir, scan_iocs=False)
+            with self.assertLogs("scanner_engine", level="ERROR") as captured:
+                result = scanner.scan_directory(temp_dir, scan_iocs=False)
 
         self.assertEqual(len(result), 4)
         self.assertEqual(result[0], None)
         self.assertEqual(result[1], [])
         self.assertEqual(result[3], [])
+        self.assertIn("Could not detect ecosystem in directory", "\n".join(captured.output))
 
     def test_scan_file_returns_four_tuple_when_ecosystem_missing(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as temp_file:
@@ -70,7 +111,8 @@ class ScannerRegressionTests(unittest.TestCase):
             temp_path = temp_file.name
 
         try:
-            result = scanner.scan_file(temp_path, scan_iocs=False)
+            with self.assertLogs("scanner_engine", level="ERROR") as captured:
+                result = scanner.scan_file(temp_path, scan_iocs=False)
         finally:
             os.unlink(temp_path)
 
@@ -78,6 +120,7 @@ class ScannerRegressionTests(unittest.TestCase):
         self.assertEqual(result[0], None)
         self.assertEqual(result[1], [])
         self.assertEqual(result[3], [])
+        self.assertIn("Could not determine ecosystem for file", "\n".join(captured.output))
 
     def test_scan_file_uses_generic_parser_for_explicit_ecosystem_package_lists(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as temp_file:
@@ -85,11 +128,12 @@ class ScannerRegressionTests(unittest.TestCase):
             temp_path = temp_file.name
 
         try:
-            ecosystem, packages, _, _ = scanner.scan_file(
-                temp_path,
-                ecosystem="pypi",
-                scan_iocs=False,
-            )
+            with self.assertLogs("scanner_engine", level="INFO"):
+                ecosystem, packages, _, _ = scanner.scan_file(
+                    temp_path,
+                    ecosystem="pypi",
+                    scan_iocs=False,
+                )
         finally:
             os.unlink(temp_path)
 
@@ -99,7 +143,7 @@ class ScannerRegressionTests(unittest.TestCase):
             [("requests", "2.32.0", "pypi"), ("flask", "", "pypi")],
         )
 
-    def test_cli_defaults_to_existing_local_threat_data_only(self):
+    def test_cli_ioc_only_disables_ensure_data(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as temp_file:
             temp_file.write("requests==2.32.0\n")
             temp_path = temp_file.name
@@ -118,15 +162,16 @@ class ScannerRegressionTests(unittest.TestCase):
                     exit_code=0,
                     message="ok",
                 )
-                scanner.main(["--file", temp_path, "--ecosystem", "pypi", "--no-ioc"])
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    scanner.main(["--file", temp_path, "--ecosystem", "pypi", "--ioc-only"])
         finally:
             os.unlink(temp_path)
 
         request = run_scan.call_args.args[0]
         self.assertFalse(request.ensure_data)
-        self.assertFalse(request.allow_unverified_live_collection)
+        self.assertEqual(request.refresh_mode, REFRESH_MODE_EXISTING_ONLY)
 
-    def test_cli_requires_explicit_flag_for_unverified_live_collection(self):
+    def test_cli_uses_gated_refresh_mode_by_default(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as temp_file:
             temp_file.write("requests==2.32.0\n")
             temp_path = temp_file.name
@@ -145,68 +190,63 @@ class ScannerRegressionTests(unittest.TestCase):
                     exit_code=0,
                     message="ok",
                 )
-                scanner.main(
-                    [
-                        "--file",
-                        temp_path,
-                        "--ecosystem",
-                        "pypi",
-                        "--no-ioc",
-                        "--allow-unverified-live-collection",
-                    ]
-                )
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    scanner.main(["--file", temp_path, "--ecosystem", "pypi", "--no-ioc"])
         finally:
             os.unlink(temp_path)
 
         request = run_scan.call_args.args[0]
         self.assertTrue(request.ensure_data)
-        self.assertTrue(request.allow_unverified_live_collection)
+        self.assertEqual(request.refresh_mode, REFRESH_MODE_LIVE_GATED_IF_NEEDED)
 
-    def test_ensure_threat_data_force_update_requires_explicit_live_opt_in(self):
-        orchestrator = _import_orchestrator()
-        empty_statuses = {
-            ecosystem: {
-                "usable": False,
-                "data_status": "failed",
-                "sources_used": [],
-                "experimental_sources_used": [],
-                "metadata_ready": False,
-                "exists": False,
-            }
-            for ecosystem in ["npm", "pypi", "rubygems", "go", "maven", "cargo"]
-        }
+    def test_cli_latest_data_uses_live_gated_force(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as temp_file:
+            temp_file.write("requests==2.32.0\n")
+            temp_path = temp_file.name
 
-        with patch.object(
-            orchestrator,
-            "collect_all_data",
-            return_value={"success": True, "database_statuses": {}},
-        ) as collect:
-            with patch.object(orchestrator, "get_database_statuses", return_value=empty_statuses):
-                summary = scanner.ensure_threat_data(force_update=True)
+        try:
+            with patch("malicious_package_scanner.run_scan") as run_scan:
+                run_scan.return_value = ScanResult(
+                    ecosystem="pypi",
+                    scanned_path=temp_path,
+                    requested_ecosystems=["pypi"],
+                    packages=[],
+                    malicious_packages=[],
+                    iocs=[],
+                    report_path=None,
+                    data_metadata={},
+                    exit_code=0,
+                    message="ok",
+                )
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    scanner.main(["--file", temp_path, "--ecosystem", "pypi", "--latest-data", "--no-ioc"])
+        finally:
+            os.unlink(temp_path)
 
-        self.assertFalse(summary["success"])
-        self.assertTrue(summary["refresh_required"])
-        self.assertIn("explicit opt-in", summary["message"])
-        collect.assert_not_called()
+        request = run_scan.call_args.args[0]
+        self.assertEqual(request.refresh_mode, REFRESH_MODE_LIVE_GATED_FORCE)
 
-    def test_ensure_threat_data_force_update_collects_when_explicitly_opted_in(self):
-        orchestrator = _import_orchestrator()
-        with patch.object(
-            orchestrator,
-            "collect_all_data",
-            return_value={"success": True, "database_statuses": {}},
-        ) as collect:
-            summary = scanner.ensure_threat_data(
-                force_update=True,
-                allow_unverified_live_collection=True,
-            )
+    def test_ensure_threat_data_force_update_runs_gated_live_refresh(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch(
+                "scanner_engine._load_live_update_runtime",
+                return_value=(temp_dir, {"enabled": True}, temp_dir),
+            ):
+                with patch("scanner_engine._perform_gated_live_refresh") as gated_refresh:
+                    gated_refresh.return_value = {
+                        "success": True,
+                        "database_statuses": {},
+                        "used_live_collection": True,
+                        "promotion_decision": "promoted",
+                        "kept_last_known_good": False,
+                        "anomalies": [],
+                    }
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        summary = scanner.ensure_threat_data(force_update=True)
 
         self.assertTrue(summary["success"])
         self.assertTrue(summary["used_live_collection"])
-        collect.assert_called_once_with(
-            build_if_missing=False,
-            include_experimental=False,
-        )
+        gated_refresh.assert_called_once()
 
     def test_ensure_threat_data_uses_existing_database_statuses_when_ready(self):
         orchestrator = _import_orchestrator()
@@ -253,18 +293,23 @@ class ScannerRegressionTests(unittest.TestCase):
 
     def test_collectors_and_utils_no_longer_raise_logger_nameerror(self):
         with patch.object(collect_osv, "download_ecosystem_data", return_value=None):
-            result = collect_osv.fetch_osv_packages()
+            with self.assertLogs("collectors.collect_osv", level="INFO"):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    result = collect_osv.fetch_osv_packages()
 
         self.assertEqual(result["source"], "osv")
 
-        socketdev_result = collect_socketdev.fetch_socketdev_packages()
+        with self.assertLogs("collectors.collect_socketdev", level="INFO"):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                socketdev_result = collect_socketdev.fetch_socketdev_packages()
         self.assertEqual(socketdev_result["source"], "socketdev")
 
         with tempfile.NamedTemporaryFile("w", delete=False) as temp_file:
             temp_path = temp_file.name
 
         try:
-            self.assertFalse(utils.ensure_directory(os.path.join(temp_path, "child")))
+            with self.assertLogs("collectors.utils", level="ERROR"):
+                self.assertFalse(utils.ensure_directory(os.path.join(temp_path, "child")))
         finally:
             os.unlink(temp_path)
 
@@ -285,16 +330,193 @@ class ScannerRegressionTests(unittest.TestCase):
             "load_all_raw_data",
             return_value=[],
         ) as load_all_raw_data:
-            summary = orchestrator.build_databases(
-                selected_sources=["openssf", "osv"],
-                source_results={
-                    "openssf": {"success": False},
-                    "osv": {"success": True},
-                },
-            )
+            with self.assertLogs("orchestrator", level="INFO"):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    summary = orchestrator.build_databases(
+                        selected_sources=["openssf", "osv"],
+                        source_results={
+                            "openssf": {"success": False},
+                            "osv": {"success": True},
+                        },
+                    )
 
         self.assertFalse(summary["success"])
-        load_all_raw_data.assert_called_once_with(["osv"])
+        load_all_raw_data.assert_called_once_with(["osv"], raw_data_dir=None)
+
+    def test_gated_live_refresh_promotes_normal_candidate(self):
+        orchestrator = _import_orchestrator()
+        source_definitions = {
+            "openssf": {"tier": "core"},
+            "osv": {"tier": "core"},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            active_final_dir = os.path.join(temp_dir, "active-final")
+            promotion_root = os.path.join(temp_dir, "live-updates")
+            active_packages = self._build_packages(["pkg-a", "pkg-b", "pkg-c"])
+            candidate_packages = self._build_packages(["pkg-a", "pkg-b", "pkg-c", "pkg-d"])
+            self._write_database(active_final_dir, "npm", active_packages)
+
+            def fake_run_all_collectors(**_kwargs):
+                return {
+                    "openssf": {"success": True, "package_count": 4, "tier": "core", "error": ""},
+                    "osv": {"success": True, "package_count": 4, "tier": "core", "error": ""},
+                }
+
+            def fake_build_databases(
+                selected_sources=None,
+                source_results=None,
+                raw_data_dir=None,
+                final_data_dir=None,
+            ):
+                self._write_database(final_data_dir, "npm", candidate_packages)
+                return {
+                    "success": True,
+                    "database_statuses": orchestrator.get_database_statuses(
+                        ecosystems=["npm"],
+                        final_data_dir=final_data_dir,
+                    ),
+                    "build_results": {"npm": True},
+                }
+
+            helpers = (
+                orchestrator.collect_all_data,
+                fake_build_databases,
+                orchestrator.databases_need_refresh,
+                orchestrator.get_database_statuses,
+                lambda include_experimental=False: ["openssf", "osv"],
+                fake_run_all_collectors,
+                ["npm"],
+                source_definitions,
+            )
+
+            with patch("scanner_engine._load_orchestrator_helpers", return_value=helpers):
+                summary = engine._perform_gated_live_refresh(
+                    include_experimental_sources=False,
+                    promotion_root=promotion_root,
+                    live_updates_config={"enabled": True},
+                    active_final_data_dir=active_final_dir,
+                )
+
+            self.assertTrue(summary["success"])
+            self.assertEqual(summary["promotion_decision"], "promoted")
+            self.assertFalse(summary["kept_last_known_good"])
+            conn = collector_db.open_database(os.path.join(active_final_dir, "unified_npm.db"))
+            try:
+                self.assertEqual(len(collector_db.list_package_names(conn)), 4)
+            finally:
+                conn.close()
+            self.assertTrue(os.path.exists(summary["active_summary_path"]))
+
+    def test_gated_live_refresh_rejects_large_removal_and_keeps_last_known_good(self):
+        orchestrator = _import_orchestrator()
+        source_definitions = {
+            "openssf": {"tier": "core"},
+            "osv": {"tier": "core"},
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            active_final_dir = os.path.join(temp_dir, "active-final")
+            promotion_root = os.path.join(temp_dir, "live-updates")
+            active_packages = self._build_packages([f"pkg-{index}" for index in range(400)])
+            candidate_packages = self._build_packages([f"pkg-{index}" for index in range(50)])
+            self._write_database(active_final_dir, "npm", active_packages)
+
+            def fake_run_all_collectors(**_kwargs):
+                return {
+                    "openssf": {"success": True, "package_count": 50, "tier": "core", "error": ""},
+                    "osv": {"success": True, "package_count": 50, "tier": "core", "error": ""},
+                }
+
+            def fake_build_databases(
+                selected_sources=None,
+                source_results=None,
+                raw_data_dir=None,
+                final_data_dir=None,
+            ):
+                self._write_database(final_data_dir, "npm", candidate_packages)
+                return {
+                    "success": True,
+                    "database_statuses": orchestrator.get_database_statuses(
+                        ecosystems=["npm"],
+                        final_data_dir=final_data_dir,
+                    ),
+                    "build_results": {"npm": True},
+                }
+
+            helpers = (
+                orchestrator.collect_all_data,
+                fake_build_databases,
+                orchestrator.databases_need_refresh,
+                orchestrator.get_database_statuses,
+                lambda include_experimental=False: ["openssf", "osv"],
+                fake_run_all_collectors,
+                ["npm"],
+                source_definitions,
+            )
+
+            with patch("scanner_engine._load_orchestrator_helpers", return_value=helpers):
+                summary = engine._perform_gated_live_refresh(
+                    include_experimental_sources=False,
+                    promotion_root=promotion_root,
+                    live_updates_config={"enabled": True},
+                    active_final_data_dir=active_final_dir,
+                )
+
+            self.assertTrue(summary["success"])
+            self.assertEqual(summary["promotion_decision"], "rejected")
+            self.assertTrue(summary["kept_last_known_good"])
+            self.assertTrue(summary["anomalies"])
+            conn = collector_db.open_database(os.path.join(active_final_dir, "unified_npm.db"))
+            try:
+                self.assertEqual(len(collector_db.list_package_names(conn)), 400)
+            finally:
+                conn.close()
+
+    def test_live_refresh_allows_partial_core_source_updates_by_default(self):
+        report = evaluate_candidate(
+            attempt_id="attempt-1",
+            timestamp="2026-04-06T00:00:00Z",
+            selected_sources=["openssf", "osv"],
+            source_definitions={
+                "openssf": {"tier": "core"},
+                "osv": {"tier": "core"},
+            },
+            candidate_summary={
+                "build_success": True,
+                "build_results": {"npm": True},
+                "ecosystems": {
+                    "npm": {
+                        "usable": True,
+                        "data_status": "partial",
+                        "total_packages": 100,
+                    }
+                },
+                "source_counts": {
+                    "openssf": {"success": False, "package_count": 0, "tier": "core", "error": "timeout"},
+                    "osv": {"success": True, "package_count": 100, "tier": "core", "error": ""},
+                },
+            },
+            active_summary={
+                "npm": {
+                    "usable": True,
+                    "data_status": "complete",
+                    "total_packages": 100,
+                }
+            },
+            candidate_names={"npm": {"pkg-a", "pkg-b", "pkg-c"}},
+            active_names={"npm": {"pkg-a", "pkg-b", "pkg-c"}},
+            active_source_counts={
+                "openssf": {"package_count": 500},
+                "osv": {"package_count": 100},
+            },
+            live_update_config={},
+        )
+
+        self.assertEqual(report["decision"], "promoted")
+        severities = {anomaly["code"]: anomaly["severity"] for anomaly in report["anomalies"]}
+        self.assertEqual(severities["core_source_failed"], "warn")
+        self.assertEqual(severities["ecosystem_regressed"], "warn")
 
     def test_pyproject_dependencies_are_parsed_from_real_pyproject_filename(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -443,23 +665,25 @@ class ScannerRegressionTests(unittest.TestCase):
 
             self.assertFalse(os.path.exists(escape_target))
 
-    def test_openssf_live_collection_requires_explicit_opt_in(self):
-        with patch.dict(os.environ, {}, clear=False):
-            with patch("collectors.collect_openssf.os.path.exists", return_value=False):
-                with patch("collectors.collect_openssf.subprocess.run") as mocked_run:
+    def test_openssf_live_collection_runs_without_extra_opt_in(self):
+        clone_result = type("CloneResult", (), {"returncode": 0, "stderr": ""})()
+        with patch("collectors.collect_openssf.os.path.exists", return_value=False):
+            with patch("collectors.collect_openssf.subprocess.run", return_value=clone_result) as mocked_run:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     result = collect_openssf.clone_or_update_repo()
 
-        self.assertIsNone(result)
-        mocked_run.assert_not_called()
+        self.assertEqual(result, collect_openssf.CACHE_DIR)
+        mocked_run.assert_called_once()
 
-    def test_openssf_cached_repo_is_ignored_without_explicit_opt_in(self):
-        with patch.dict(os.environ, {}, clear=False):
-            with patch("collectors.collect_openssf.os.path.exists", return_value=True):
-                with patch("collectors.collect_openssf.subprocess.run") as mocked_run:
-                    result = collect_openssf.clone_or_update_repo()
+    def test_openssf_cached_repo_updates_when_present(self):
+        with patch("collectors.collect_openssf.os.path.exists", return_value=True):
+            with patch("collectors.collect_openssf.subprocess.run") as mocked_run:
+                with self.assertLogs("collectors.collect_openssf", level="INFO"):
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                        result = collect_openssf.clone_or_update_repo()
 
-        self.assertIsNone(result)
-        mocked_run.assert_not_called()
+        self.assertEqual(result, collect_openssf.CACHE_DIR)
+        mocked_run.assert_called_once()
 
     def test_cargo_lock_dependencies_are_parsed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -511,6 +735,9 @@ class ScannerRegressionTests(unittest.TestCase):
                     "sources_used": ["openssf", "osv"],
                     "experimental_sources_used": ["phylum"],
                     "missing_ecosystems": ["pypi"],
+                    "promotion_decision": "rejected",
+                    "kept_last_known_good": True,
+                    "anomalies": [{"severity": "block", "message": "count drop"}],
                 },
             )
 
@@ -521,6 +748,9 @@ class ScannerRegressionTests(unittest.TestCase):
         self.assertEqual(report["sources_used"], ["openssf", "osv"])
         self.assertEqual(report["experimental_sources_used"], ["phylum"])
         self.assertEqual(report["missing_ecosystems"], ["pypi"])
+        self.assertEqual(report["promotion_decision"], "rejected")
+        self.assertTrue(report["kept_last_known_good"])
+        self.assertEqual(report["anomalies"][0]["message"], "count drop")
 
 
 if __name__ == "__main__":

@@ -19,14 +19,14 @@ import utils
 import db
 
 
-def load_all_raw_data(source_names=None):
+def load_all_raw_data(source_names=None, raw_data_dir=None):
     """
     Load all raw data files from raw-data directory
 
     Returns:
         list: List of data dictionaries from all sources
     """
-    raw_data_dir = os.path.join(os.path.dirname(__file__), 'raw-data')
+    raw_data_dir = raw_data_dir or os.path.join(os.path.dirname(__file__), 'raw-data')
     if source_names is not None:
         raw_files = [f'{source}.json' for source in source_names]
     else:
@@ -185,7 +185,7 @@ def merge_packages_by_ecosystem(raw_data_list):
     return result
 
 
-def build_unified_database(ecosystem, packages, metadata=None, timestamp=None):
+def build_unified_database(ecosystem, packages, metadata=None, timestamp=None, output_dir=None):
     """
     Build SQLite database for a specific ecosystem.
 
@@ -199,11 +199,12 @@ def build_unified_database(ecosystem, packages, metadata=None, timestamp=None):
     # Sort packages by name
     packages = sorted(packages, key=lambda p: p.get('name', '').lower())
 
-    output_path = os.path.join(
+    output_dir = output_dir or os.path.join(
         os.path.dirname(__file__),
         'final-data',
-        f'unified_{ecosystem}.db'
     )
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f'unified_{ecosystem}.db')
 
     try:
         # Create database with temp file
@@ -227,6 +228,16 @@ def build_unified_database(ecosystem, packages, metadata=None, timestamp=None):
         return True
 
     except Exception as e:
+        if "conn" in locals():
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if "temp_path" in locals() and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
         logger.error("Error building database for %s: %s", ecosystem, e)
         return False
 

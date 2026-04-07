@@ -13,6 +13,9 @@ import sys
 
 from logging_config import setup_logging
 from monitor.cli import run_monitor_cli
+from scanner_engine import REFRESH_MODE_EXISTING_ONLY
+from scanner_engine import REFRESH_MODE_LIVE_GATED_FORCE
+from scanner_engine import REFRESH_MODE_LIVE_GATED_IF_NEEDED
 from scanner_engine import ScanRequest
 from scanner_engine import aggregate_package_locations
 from scanner_engine import ensure_threat_data
@@ -105,13 +108,7 @@ Examples:
         "--latest-data",
         action="store_true",
         dest="latest_data",
-        help="Force a threat-data refresh before scanning; requires explicit opt-in for unverified live collection",
-    )
-    parser.add_argument(
-        "--allow-unverified-live-collection",
-        action="store_true",
-        dest="allow_unverified_live_collection",
-        help="Explicitly allow unverified live collector refresh instead of using only local/signed snapshot data",
+        help="Force a live threat-data refresh before scanning and promote it only if anomaly gates pass",
     )
     parser.add_argument(
         "--strict-data",
@@ -183,10 +180,14 @@ def main(argv: list[str] | None = None) -> int:
         force_latest_data=args.latest_data,
         strict_data=args.strict_data,
         include_experimental_sources=args.include_experimental_sources,
-        ensure_data=(not args.ioc_only) and (
-            args.latest_data or args.allow_unverified_live_collection
+        ensure_data=not args.ioc_only,
+        refresh_mode=(
+            REFRESH_MODE_EXISTING_ONLY
+            if args.ioc_only
+            else REFRESH_MODE_LIVE_GATED_FORCE
+            if args.latest_data
+            else REFRESH_MODE_LIVE_GATED_IF_NEEDED
         ),
-        allow_unverified_live_collection=args.allow_unverified_live_collection,
         print_summary=not args.no_summary,
     )
     result = run_scan(request)

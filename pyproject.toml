@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+requires = ["setuptools>=80", "wheel>=0.45"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "orewatch"
-version = "1.1.2"
+version = "1.1.3"
 description = "OreWatch: multi-ecosystem malicious package detection and background monitoring for developers."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -42,6 +42,11 @@ dependencies = [
   "defusedxml==0.7.1",
 ]
 
+[project.optional-dependencies]
+mac-menubar = [
+  "pyobjc-framework-Cocoa>=11.1 ; platform_system == 'Darwin'",
+]
+
 [project.urls]
 Homepage = "https://github.com/rapticore/ore-mal-pkg-inspector"
 Repository = "https://github.com/rapticore/ore-mal-pkg-inspector"
@@ -59,4 +64,5 @@ include = ["collectors", "monitor", "scanners"]
 
 [tool.setuptools.package-data]
 collectors = ["config.yaml"]
+monitor = ["assets/*.png"]
 scanners = ["affected_packages.yaml"]

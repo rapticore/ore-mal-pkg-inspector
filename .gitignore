@@ -5,7 +5,15 @@ collectors/raw-data/
 collectors/final-data/
 __pycache__/
 *.pyc
+.pytest_cache/
 build/
 dist/
 *.egg-info/
 .env
+.venv/
+env/
+.claude/
+.cursor/
+.idea/
+tmp/
+.DS_Store

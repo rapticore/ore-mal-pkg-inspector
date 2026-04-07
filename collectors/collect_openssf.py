@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 REPO_URL = "https://github.com/ossf/malicious-packages.git"
 CACHE_DIR = os.path.join(os.path.dirname(__file__), '.cache', 'ossf-repo')
 MALICIOUS_PATH = "osv/malicious"
-ALLOW_UNVERIFIED_OPENSSF_ENV = "OREWATCH_ALLOW_UNVERIFIED_OPENSSF"
 
 # Ecosystems to collect (matches directory names in repo)
 ECOSYSTEMS = ['npm', 'pypi', 'go', 'rubygems', 'maven', 'crates.io', 'nuget']
@@ -40,16 +39,7 @@ def clone_or_update_repo():
     Returns:
         str: Path to repo root, or None on error
     """
-    allow_unverified_live = os.environ.get(ALLOW_UNVERIFIED_OPENSSF_ENV) == "1"
-
     if os.path.exists(os.path.join(CACHE_DIR, '.git')):
-        if not allow_unverified_live:
-            logger.warning(
-                "  Ignoring cached OpenSSF repo because repository content is not "
-                "integrity-verified. Use signed snapshots or set %s=1 to opt in.",
-                ALLOW_UNVERIFIED_OPENSSF_ENV,
-            )
-            return None
         logger.info("  Updating existing repo cache...")
         try:
             subprocess.run(
@@ -63,14 +53,6 @@ def clone_or_update_repo():
             logger.info("Warning: Could not update repo: %s", e)
             print("  Using existing cache...")
             return CACHE_DIR
-
-    if not allow_unverified_live:
-        logger.warning(
-            "  Skipping OpenSSF live collection because repository content is not "
-            "integrity-verified. Use signed snapshots or set %s=1 to opt in.",
-            ALLOW_UNVERIFIED_OPENSSF_ENV,
-        )
-        return None
 
     print("  Cloning repository (this may take a few minutes)...")
     os.makedirs(os.path.dirname(CACHE_DIR), exist_ok=True)
