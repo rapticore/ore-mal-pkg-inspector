@@ -26,6 +26,9 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade build twine
 
+      - name: Install project dependencies
+        run: python -m pip install -e .
+
       - name: Run packaging and client tests
         run: python -m unittest tests.test_packaging tests.test_client_e2e -v
 
