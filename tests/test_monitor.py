@@ -106,6 +106,17 @@ class MonitorTests(unittest.TestCase):
     def _generate_keys(self, repo_root):
         return generate_keypair(os.path.join(repo_root, "keys"))
 
+    def _write_snapshot_fixture_db(self, db_path: str, marker: str) -> bytes:
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("CREATE TABLE snapshot_marker (value TEXT NOT NULL)")
+            conn.execute("INSERT INTO snapshot_marker(value) VALUES (?)", (marker,))
+            conn.commit()
+        finally:
+            conn.close()
+        with open(db_path, "rb") as handle:
+            return handle.read()
+
     def test_install_creates_monitor_layout_and_service_files(self):
         with tempfile.TemporaryDirectory() as repo_root:
             service = MonitorService(repo_root)
@@ -2459,8 +2470,7 @@ class MonitorTests(unittest.TestCase):
             source_final_data_dir = os.path.join(repo_root, "snapshot-source")
             os.makedirs(source_final_data_dir, exist_ok=True)
             source_db_path = os.path.join(source_final_data_dir, "unified_npm.db")
-            with open(source_db_path, "wb") as handle:
-                handle.write(b"original-db")
+            expected_bytes = self._write_snapshot_fixture_db(source_db_path, "original-db")
 
             snapshot_dir = os.path.join(repo_root, "snapshot-output")
             manifest_path = build_snapshot(
@@ -2482,7 +2492,7 @@ class MonitorTests(unittest.TestCase):
 
             self.assertTrue(result["success"])
             with open(db_path, "rb") as handle:
-                self.assertEqual(handle.read(), b"original-db")
+                self.assertEqual(handle.read(), expected_bytes)
             self.assertEqual(result["key_id"], keys["key_id"])
 
     def test_publish_snapshot_creates_channel_descriptor_and_apply_from_channel(self):
@@ -2491,8 +2501,7 @@ class MonitorTests(unittest.TestCase):
             source_final_data_dir = os.path.join(repo_root, "publish-source")
             os.makedirs(source_final_data_dir, exist_ok=True)
             source_db_path = os.path.join(source_final_data_dir, "unified_npm.db")
-            with open(source_db_path, "wb") as handle:
-                handle.write(b"channel-original")
+            expected_bytes = self._write_snapshot_fixture_db(source_db_path, "channel-original")
 
             publish_dir = os.path.join(repo_root, "published")
             publish_result = publish_snapshot(
@@ -2518,7 +2527,7 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(result["channel"], "stable")
             self.assertEqual(result["key_id"], keys["key_id"])
             with open(db_path, "rb") as handle:
-                self.assertEqual(handle.read(), b"channel-original")
+                self.assertEqual(handle.read(), expected_bytes)
 
     def test_apply_snapshot_rolls_back_when_directory_swap_fails(self):
         with tempfile.TemporaryDirectory() as repo_root:
@@ -2526,8 +2535,7 @@ class MonitorTests(unittest.TestCase):
             source_final_data_dir = os.path.join(repo_root, "rollback-source")
             os.makedirs(source_final_data_dir, exist_ok=True)
             source_db_path = os.path.join(source_final_data_dir, "unified_npm.db")
-            with open(source_db_path, "wb") as handle:
-                handle.write(b"rollback-original")
+            self._write_snapshot_fixture_db(source_db_path, "rollback-original")
 
             publish_dir = os.path.join(repo_root, "published")
             publish_result = publish_snapshot(
@@ -2574,8 +2582,7 @@ class MonitorTests(unittest.TestCase):
             source_final_data_dir = os.path.join(repo_root, "wrong-key-source")
             os.makedirs(source_final_data_dir, exist_ok=True)
             source_db_path = os.path.join(source_final_data_dir, "unified_npm.db")
-            with open(source_db_path, "wb") as handle:
-                handle.write(b"signed-db")
+            self._write_snapshot_fixture_db(source_db_path, "signed-db")
 
             snapshot_dir = os.path.join(repo_root, "snapshot-output")
             manifest_path = build_snapshot(

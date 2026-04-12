@@ -6,6 +6,7 @@ Localhost API for IDE and agent integrations.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -209,10 +210,27 @@ def validate_client_request(payload: Dict[str, Any], manifest: bool = False) -> 
     project_path = str(payload.get("project_path", "")).strip()
     if not project_path:
         raise ValueError("project_path is required")
+    # Prevent path traversal: project_path must be an absolute, resolved path
+    if not os.path.isabs(project_path):
+        raise ValueError("project_path must be an absolute path")
+    resolved_project = os.path.realpath(project_path)
+    if ".." in os.path.normpath(project_path).split(os.sep):
+        raise ValueError("project_path must not contain '..' components")
+    payload["project_path"] = resolved_project
 
     if manifest:
-        if not str(payload.get("manifest_path", "")).strip():
+        manifest_path = str(payload.get("manifest_path", "")).strip()
+        if not manifest_path:
             raise ValueError("manifest_path is required")
+        # Prevent path traversal: manifest_path must resolve within project_path
+        if not os.path.isabs(manifest_path):
+            raise ValueError("manifest_path must be an absolute path")
+        resolved_manifest = os.path.realpath(manifest_path)
+        if not resolved_manifest.startswith(resolved_project + os.sep):
+            raise ValueError(
+                "manifest_path must be located within the project_path directory"
+            )
+        payload["manifest_path"] = resolved_manifest
         _validate_dependencies(payload.get("dependencies"), required=False)
         return
 
@@ -301,6 +319,9 @@ class _MonitorAPIHandler(BaseHTTPRequestHandler):
 
     def _authorize(self) -> bool:
         import hmac
+        if not self.server.api_token or len(self.server.api_token) < 16:
+            self._write_json(500, {"error": "Server token not properly configured"})
+            return False
         expected = f"Bearer {self.server.api_token}"
         provided = self.headers.get("Authorization", "")
         if not hmac.compare_digest(provided, expected):

@@ -201,7 +201,10 @@ def run_collector(
     except Exception as e:
         # Sanitize the error message to prevent log injection via crafted
         # exception strings (e.g. newline/control characters).
-        safe_error = str(e).replace("\n", " ").replace("\r", " ")[:500]
+        raw_error = str(e)
+        safe_error = "".join(
+            ch if ch.isprintable() else " " for ch in raw_error
+        )[:500]
         logger.error("✗ %s failed with error: %s", name, safe_error)
         # Save error result
         utils.save_json({
@@ -213,7 +216,7 @@ def run_collector(
             "packages": [],
             "error": safe_error
         }, output_path)
-        result['error'] = str(e)
+        result['error'] = safe_error
         return result
 
 

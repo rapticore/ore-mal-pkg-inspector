@@ -1080,12 +1080,19 @@ class MonitorService:
         "systemd-run",
     })
 
+    _ALLOWED_SUBCOMMANDS: Dict[str, set] = {
+        "launchctl": {"load", "unload", "list", "print", "bootstrap", "bootout", "enable", "disable", "kickstart"},
+        "systemctl": {"start", "stop", "restart", "enable", "disable", "status", "is-active", "is-enabled", "daemon-reload"},
+        "systemd-run": set(),  # accepts various flags, no fixed subcommands
+    }
+
     _SHELL_METACHARACTERS = frozenset(";&|`$(){}[]!#~<>\\'\"\n\r")
 
     def _run_command(self, command: List[str]) -> subprocess.CompletedProcess:
         """Run a subprocess command and capture output.
 
         Only commands whose base name is in _ALLOWED_COMMANDS are permitted.
+        Subcommands are validated against _ALLOWED_SUBCOMMANDS.
         All command elements are checked for shell metacharacters.
         """
         if not command:
@@ -1097,6 +1104,19 @@ class MonitorService:
                 f"Command '{base_cmd}' is not in the allowed command set: "
                 f"{sorted(self._ALLOWED_COMMANDS)}"
             )
+
+        allowed_subs = self._ALLOWED_SUBCOMMANDS.get(base_cmd)
+        if allowed_subs is not None and len(allowed_subs) > 0 and len(command) > 1:
+            # Find the first non-flag argument after the base command
+            for arg in command[1:]:
+                if arg.startswith("-"):
+                    continue
+                if arg not in allowed_subs:
+                    raise ValueError(
+                        f"Subcommand '{arg}' is not allowed for '{base_cmd}'. "
+                        f"Allowed: {sorted(allowed_subs)}"
+                    )
+                break
 
         for i, element in enumerate(command):
             if any(ch in element for ch in self._SHELL_METACHARACTERS):
@@ -1127,26 +1147,37 @@ class MonitorService:
         return BACKGROUND_MANAGER
 
     def _service_target_path(self, manager: str) -> Optional[str]:
-        """Return the installed service definition path for one manager."""
+        """Return the installed service definition path for one manager.
+
+        Validates that the resolved path stays within the expected
+        service-definition directory to prevent path traversal.
+        """
         if manager == LAUNCHD_MANAGER:
-            return os.path.expanduser(
-                os.path.join(
-                    "~",
-                    "Library",
-                    "LaunchAgents",
-                    f"{self.identity['launchd_label']}.plist",
+            base_dir = os.path.realpath(os.path.expanduser(
+                os.path.join("~", "Library", "LaunchAgents")
+            ))
+            result = os.path.realpath(os.path.join(
+                base_dir,
+                f"{self.identity['launchd_label']}.plist",
+            ))
+            if not result.startswith(base_dir + os.sep) and result != base_dir:
+                raise ValueError(
+                    f"Resolved service path '{result}' escapes '{base_dir}'"
                 )
-            )
+            return result
         if manager == SYSTEMD_MANAGER:
-            return os.path.expanduser(
-                os.path.join(
-                    "~",
-                    ".config",
-                    "systemd",
-                    "user",
-                    self.identity["systemd_unit"],
+            base_dir = os.path.realpath(os.path.expanduser(
+                os.path.join("~", ".config", "systemd", "user")
+            ))
+            result = os.path.realpath(os.path.join(
+                base_dir,
+                self.identity["systemd_unit"],
+            ))
+            if not result.startswith(base_dir + os.sep) and result != base_dir:
+                raise ValueError(
+                    f"Resolved service path '{result}' escapes '{base_dir}'"
                 )
-            )
+            return result
         return None
 
     def _local_template_paths(self) -> Dict[str, str]:
@@ -1956,10 +1987,20 @@ class MonitorService:
     def _build_report_path(self, project_path: str, scan_kind: str) -> str:
         """Build a monitor-managed report path for one project scan."""
         slug = _slugify_path(project_path)
-        report_dir = os.path.join(self.paths["reports"], slug)
+        reports_base = os.path.realpath(self.paths["reports"])
+        report_dir = os.path.realpath(os.path.join(reports_base, slug))
+        if not report_dir.startswith(reports_base + os.sep) and report_dir != reports_base:
+            raise ValueError(
+                f"Report directory '{report_dir}' escapes the reports base '{reports_base}'"
+            )
         os.makedirs(report_dir, exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        return os.path.join(report_dir, f"{scan_kind}_{timestamp}.json")
+        result = os.path.realpath(os.path.join(report_dir, f"{scan_kind}_{timestamp}.json"))
+        if not result.startswith(report_dir + os.sep) and result != report_dir:
+            raise ValueError(
+                f"Report path '{result}' escapes the report directory '{report_dir}'"
+            )
+        return result
 
     def _run_project_scan(self, project: Dict, scan_kind: str, reason: str):
         """Run one monitored project scan and update state."""

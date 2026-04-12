@@ -182,6 +182,8 @@ def aggregate_package_locations(packages: List[Dict], scanned_path: str) -> List
     """
     Aggregate packages by ecosystem+name+version and collect file locations.
     """
+    # Resolve the scanned path to an absolute real path to prevent traversal.
+    scanned_path = os.path.realpath(scanned_path)
     aggregated: Dict[tuple, Dict] = {}
 
     for pkg in packages:
@@ -221,6 +223,12 @@ def scan_directory(directory: str, ecosystem: Optional[str] = None, scan_iocs: b
     """
     Scan a directory for dependency files and optional IoCs.
     """
+    # Resolve to real absolute path to prevent path traversal via symlinks.
+    directory = os.path.realpath(directory)
+    if not os.path.isdir(directory):
+        logger.error("❌ Not a valid directory: %s", directory)
+        return None, [], directory, []
+
     iocs: List[Dict] = []
     if scan_iocs:
         iocs = ioc_detector.scan_for_iocs(directory)
@@ -332,7 +340,14 @@ def scan_file(file_path: str, ecosystem: Optional[str] = None, scan_iocs: bool =
 def _load_orchestrator_helpers():
     """Import collector orchestrator helpers lazily."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    collectors_dir = os.path.join(script_dir, "collectors")
+    code_root = os.path.realpath(script_dir)
+    collectors_dir = os.path.realpath(os.path.join(script_dir, "collectors"))
+    if not os.path.isdir(collectors_dir):
+        raise ValueError(f"Collectors directory does not exist: {collectors_dir}")
+    if not collectors_dir.startswith(code_root + os.sep):
+        raise ValueError(
+            f"Collectors directory {collectors_dir} is outside code root {code_root}"
+        )
     if collectors_dir not in sys.path:
         sys.path.insert(0, collectors_dir)
 

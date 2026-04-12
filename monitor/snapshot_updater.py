@@ -547,13 +547,26 @@ class SnapshotUpdater:
 
         final_stage_dir = os.path.join(staged_dir, "final-data")
         os.makedirs(final_stage_dir, exist_ok=True)
+        os.chmod(final_stage_dir, 0o700)
 
         if os.path.islink(final_stage_dir):
             raise ValueError("Symlink detected in staging directory")
 
         real_stage_dir = os.path.realpath(final_stage_dir)
 
+        if not manifest.get("files"):
+            raise ValueError("Snapshot manifest contains no files")
+
         for entry in manifest.get("files", []):
+            # Validate filename contains only safe characters and no path separators
+            filename = entry.get("filename", "")
+            if not filename or os.sep in filename or "/" in filename or "\\" in filename:
+                raise ValueError(f"Invalid snapshot filename: {filename!r}")
+            if filename != os.path.basename(filename):
+                raise ValueError(f"Snapshot filename contains path components: {filename!r}")
+            if not filename.endswith(".db"):
+                raise ValueError(f"Unexpected file type in snapshot: {filename!r}")
+
             entry_source = _resolve_entry_source(manifest_source, entry)
             destination = os.path.join(final_stage_dir, entry["filename"])
 
@@ -571,6 +584,14 @@ class SnapshotUpdater:
                 raise ValueError(f"Snapshot checksum mismatch for {entry['filename']}")
             if os.path.getsize(destination) != entry["size"]:
                 raise ValueError(f"Snapshot size mismatch for {entry['filename']}")
+
+            # Validate file is a valid SQLite database (magic header)
+            with open(destination, "rb") as handle:
+                header = handle.read(16)
+            if not header.startswith(b"SQLite format 3\x00"):
+                raise ValueError(
+                    f"Snapshot file {entry['filename']} is not a valid SQLite database"
+                )
 
         return staged_dir, final_stage_dir
 
@@ -606,6 +627,14 @@ class SnapshotUpdater:
         """
         Replace the live final-data directory with a staged snapshot and roll back on failure.
         """
+        # Validate staged directory is within the expected snapshots area
+        real_staged = os.path.realpath(staged_final_dir)
+        real_snapshots = os.path.realpath(self.paths["snapshots"])
+        if real_staged != real_snapshots and not real_staged.startswith(real_snapshots + os.sep):
+            raise ValueError(
+                "Path traversal detected: staged directory resolves outside snapshots area"
+            )
+
         os.makedirs(os.path.dirname(self.final_data_dir), exist_ok=True)
         backup_archive_dir = os.path.join(self.paths["snapshots"], "backups", version)
         temp_swap_root = tempfile.mkdtemp(prefix="snapshot-swap-", dir=self.paths["snapshots"])

@@ -195,10 +195,13 @@ def _find_package_location_in_json(
     """
     # Limit input size to prevent ReDoS on crafted manifests.
     max_lines = _MAX_PARSE_FILE_BYTES // 80  # approximate line count cap
+    _max_line_len = 10 * 1024  # skip individual lines > 10 KB
     in_section = False
     for i, line in enumerate(lines, start=1):
         if i > max_lines:
             break
+        if len(line) > _max_line_len:
+            continue
         if f'"{section}"' in line and "{" in line:
             in_section = True
             continue
@@ -670,11 +673,14 @@ def _find_maven_dependency_location(
     """
     # Limit input size to prevent ReDoS on crafted manifests.
     max_lines = _MAX_PARSE_FILE_BYTES // 80
-    pattern = rf"<artifactId>({re.escape(artifact_id)})</artifactId>"
+    _max_line_len = 10 * 1024  # skip individual lines > 10 KB
+    pattern = re.compile(rf"<artifactId>({re.escape(artifact_id)})</artifactId>")
     for i, line in enumerate(xml_lines, start=1):
         if i > max_lines:
             break
-        match = re.search(pattern, line)
+        if len(line) > _max_line_len:
+            continue
+        match = pattern.search(line)
         if match:
             return {
                 "start_line": i,

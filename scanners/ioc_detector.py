@@ -41,9 +41,22 @@ SHAI_HULUD_IOCS = {
         'shai_hulud_workflow': r'\.github/workflows/shai-hulud-workflow\.yml'  # Original
     },
     'self_hosted_runner_pattern': r'runs-on:\s*self-hosted',
-    'sha1hulud_runner_pattern': r'SHA1HULUD',
+    'sha1hulud_runner_pattern': r'(?i)SHA1HULUD',
     'runner_tracking_id_pattern': r'RUNNER_TRACKING_ID:\s*0',
     'docker_privilege_escalation_pattern': r'docker\s+run\s+--rm\s+--privileged\s+-v\s+/:/host'
+}
+
+# Pre-compile regex patterns at module level to mitigate ReDoS (CWE-1333).
+# Compiled patterns are faster and their structure is validated once at import time.
+_COMPILED_PATTERNS = {
+    key: re.compile(pattern)
+    for key, pattern in SHAI_HULUD_IOCS.items()
+    if isinstance(pattern, str) and key != 'webhook_url' and key not in ('payload_files', 'data_files')
+}
+
+_COMPILED_WORKFLOW_PATTERNS = {
+    key: re.compile(pattern)
+    for key, pattern in SHAI_HULUD_IOCS.get('github_workflow_patterns', {}).items()
 }
 
 
@@ -143,7 +156,7 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                         continue
 
                     # Check for malicious postinstall pattern (original Shai-Hulud)
-                    if re.search(SHAI_HULUD_IOCS['postinstall_pattern'], content):
+                    if _COMPILED_PATTERNS['postinstall_pattern'].search(content):
                         iocs_found.append({
                             'type': 'malicious_postinstall',
                             'path': os.path.relpath(package_json_path, directory),
@@ -153,7 +166,7 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                         })
 
                     # Check for malicious preinstall pattern (Shai-Hulud 2.0)
-                    if re.search(SHAI_HULUD_IOCS['preinstall_pattern'], content):
+                    if _COMPILED_PATTERNS['preinstall_pattern'].search(content):
                         iocs_found.append({
                             'type': 'malicious_preinstall',
                             'path': os.path.relpath(package_json_path, directory),
@@ -187,9 +200,9 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                                 continue
 
                             # Check for discussion.yaml pattern
-                            if re.search(SHAI_HULUD_IOCS['github_workflow_patterns']['discussion_yaml'], 
+                            if _COMPILED_WORKFLOW_PATTERNS['discussion_yaml'].search(
                                        workflow_path.replace('\\', '/')):
-                                if re.search(SHAI_HULUD_IOCS['self_hosted_runner_pattern'], workflow_content):
+                                if _COMPILED_PATTERNS['self_hosted_runner_pattern'].search(workflow_content):
                                     iocs_found.append({
                                         'type': 'malicious_github_workflow',
                                         'path': os.path.relpath(workflow_path, directory),
@@ -199,7 +212,7 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                                     })
                             
                             # Check for formatter workflow pattern
-                            if re.search(SHAI_HULUD_IOCS['github_workflow_patterns']['formatter_yml'],
+                            if _COMPILED_WORKFLOW_PATTERNS['formatter_yml'].search(
                                        workflow_path.replace('\\', '/')):
                                 iocs_found.append({
                                     'type': 'malicious_github_workflow',
@@ -210,7 +223,7 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                                 })
                             
                             # Check for SHA1HULUD runner name
-                            if re.search(SHAI_HULUD_IOCS['sha1hulud_runner_pattern'], workflow_content, re.IGNORECASE):
+                            if _COMPILED_PATTERNS['sha1hulud_runner_pattern'].search(workflow_content):
                                 iocs_found.append({
                                     'type': 'sha1hulud_runner',
                                     'path': os.path.relpath(workflow_path, directory),
@@ -220,7 +233,7 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                                 })
                             
                             # Check for RUNNER_TRACKING_ID: 0
-                            if re.search(SHAI_HULUD_IOCS['runner_tracking_id_pattern'], workflow_content):
+                            if _COMPILED_PATTERNS['runner_tracking_id_pattern'].search(workflow_content):
                                 iocs_found.append({
                                     'type': 'suspicious_runner_config',
                                     'path': os.path.relpath(workflow_path, directory),
@@ -230,7 +243,7 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                                 })
                             
                             # Check for original shai-hulud-workflow.yml
-                            if re.search(SHAI_HULUD_IOCS['github_workflow_patterns']['shai_hulud_workflow'],
+                            if _COMPILED_WORKFLOW_PATTERNS['shai_hulud_workflow'].search(
                                        workflow_path.replace('\\', '/')):
                                 iocs_found.append({
                                     'type': 'malicious_github_workflow',
@@ -263,7 +276,7 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                             })
                         
                         # Check for Docker privilege escalation pattern (Shai-Hulud 2.0)
-                        if re.search(SHAI_HULUD_IOCS['docker_privilege_escalation_pattern'], content):
+                        if _COMPILED_PATTERNS['docker_privilege_escalation_pattern'].search(content):
                             iocs_found.append({
                                 'type': 'docker_privilege_escalation',
                                 'path': os.path.relpath(file_path, directory),

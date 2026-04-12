@@ -632,6 +632,22 @@ class ScannerRegressionTests(unittest.TestCase):
         self.assertEqual(results[0]["name"], "evilpkg")
         self.assertEqual(results[0]["matched_version"], "1.0.0")
 
+    def test_shai_hulud_exact_versions_keep_prereleases_distinct_but_allow_leading_v(self):
+        checker = MaliciousPackageChecker(collectors_dir=COLLECTORS_DIR)
+        checker._shai_hulud_cache = {"pkg": {"1.2.3"}}
+        checker._shai_hulud_loaded = True
+
+        prerelease_results = checker._check_shai_hulud_packages(
+            [{"name": "pkg", "version": "1.2.3-beta.1"}]
+        )
+        exact_results = checker._check_shai_hulud_packages(
+            [{"name": "pkg", "version": "v1.2.3"}]
+        )
+
+        self.assertEqual(prerelease_results, [])
+        self.assertEqual(len(exact_results), 1)
+        self.assertEqual(exact_results[0]["matched_version"], "v1.2.3")
+
     def test_litellm_exact_requirement_stays_exact_while_range_becomes_unknown(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             requirements_path = os.path.join(temp_dir, "requirements.txt")

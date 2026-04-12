@@ -130,7 +130,10 @@ class MaliciousPackageChecker:
         Returns:
             Normalized version
         """
-        return version.strip()
+        normalized = version.strip()
+        if normalized[:1] in {"v", "V"} and normalized[1:2].isdigit():
+            normalized = normalized[1:]
+        return normalized
 
     def _lookup_names_for_ecosystem(self, ecosystem: str, name: str) -> List[str]:
         """Return lookup name variants for one ecosystem."""
@@ -255,6 +258,9 @@ class MaliciousPackageChecker:
                     return None
                 yaml_content = raw_content.decode('utf-8')
                 config = yaml.safe_load(yaml_content)
+                if not isinstance(config, dict):
+                    logger.warning("Downloaded Shai-Hulud config is not a dict; ignoring")
+                    return None
                 return config
         except (urllib.error.URLError, urllib.error.HTTPError, yaml.YAMLError, KeyError) as e:
             # Silently fail - will fall back to local file
@@ -298,9 +304,14 @@ class MaliciousPackageChecker:
                 matched_version = None
                 
                 if pkg_version:
-                    # Clean version string (remove ^, ~, etc.)
-                    clean_version = re.sub(r'^[\^~>=<]', '', pkg_version)
-                    is_malicious = clean_version in affected_versions
+                    # Clean version string (remove ^, ~, >=, etc.)
+                    clean_version = re.sub(r'^[\^~>=<! ]+', '', pkg_version)
+                    normalized_version = self._normalize_version(clean_version)
+                    normalized_affected_versions = {
+                        self._normalize_version(version)
+                        for version in affected_versions
+                    }
+                    is_malicious = normalized_version in normalized_affected_versions
                     if is_malicious:
                         matched_version = clean_version
                 else:

@@ -127,11 +127,54 @@ def _safe_instance_name(repo_root: str) -> str:
     return f"{safe_basename}-{digest}"
 
 
+def _path_is_within(base: str, candidate: str) -> bool:
+    """Return True when *candidate* is equal to or nested under *base*."""
+    return candidate == base or candidate.startswith(base + os.sep)
+
+
+def _check_path_components_for_symlinks(path: str, allowed_root: str) -> None:
+    """Walk each component of *path* and reject symlinks that escape *allowed_root*."""
+    current = path
+    checked: set[str] = set()
+    while True:
+        if current in checked:
+            break
+        checked.add(current)
+        if os.path.islink(current):
+            target_real = os.path.realpath(current)
+            if not _path_is_within(allowed_root, target_real):
+                raise RuntimeError(
+                    f"Refusing to follow symlink that escapes {allowed_root}: {current} -> {target_real}"
+                )
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+
+
 def _expand_base_path(path: str) -> str:
     expanded = os.path.abspath(os.path.expanduser(path))
     if os.path.lexists(expanded) and os.path.islink(expanded):
         raise RuntimeError(f"Refusing to use symlinked monitor root: {expanded}")
-    return os.path.realpath(expanded)
+    resolved = os.path.realpath(expanded)
+    home_real = os.path.realpath(os.path.expanduser("~"))
+    # Only apply the ancestor symlink walk to home-scoped paths. Explicit
+    # overrides may legitimately live under system temp roots such as /tmp or
+    # macOS /var -> /private/var aliases.
+    if _path_is_within(home_real, expanded) or _path_is_within(home_real, resolved):
+        _check_path_components_for_symlinks(expanded, home_real)
+    return resolved
+
+
+def _validate_path_within_user_home(path: str, description: str) -> str:
+    """Ensure a resolved path is within the user's home directory."""
+    resolved = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    home_real = os.path.realpath(os.path.expanduser("~"))
+    if not _path_is_within(home_real, resolved):
+        raise RuntimeError(
+            f"Refusing to use {description} outside user home: {resolved}"
+        )
+    return resolved
 
 
 def get_monitor_config_root() -> str:
@@ -140,14 +183,18 @@ def get_monitor_config_root() -> str:
     if override:
         return _expand_base_path(override)
     if sys.platform == "darwin":
-        return os.path.join(
+        base = os.path.join(
             os.path.expanduser("~/Library/Application Support"),
             APP_DISPLAY_NAME,
         )
+        return _validate_path_within_user_home(base, "config root")
     xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
     if xdg_config_home:
-        return os.path.join(_expand_base_path(xdg_config_home), APP_NAME)
-    return os.path.join(os.path.expanduser("~/.config"), APP_NAME)
+        safe_base = _expand_base_path(xdg_config_home)
+        result = os.path.join(safe_base, APP_NAME)
+        return _validate_path_within_user_home(result, "XDG config root")
+    default_path = os.path.join(os.path.expanduser("~/.config"), APP_NAME)
+    return _validate_path_within_user_home(default_path, "config root")
 
 
 def get_monitor_state_root() -> str:
@@ -156,15 +203,19 @@ def get_monitor_state_root() -> str:
     if override:
         return _expand_base_path(override)
     if sys.platform == "darwin":
-        return os.path.join(
+        base = os.path.join(
             os.path.expanduser("~/Library/Application Support"),
             APP_DISPLAY_NAME,
             "State",
         )
+        return _validate_path_within_user_home(base, "state root")
     xdg_state_home = os.environ.get("XDG_STATE_HOME")
     if xdg_state_home:
-        return os.path.join(_expand_base_path(xdg_state_home), APP_NAME)
-    return os.path.join(os.path.expanduser("~/.local/state"), APP_NAME)
+        safe_base = _expand_base_path(xdg_state_home)
+        result = os.path.join(safe_base, APP_NAME)
+        return _validate_path_within_user_home(result, "XDG state root")
+    default_path = os.path.join(os.path.expanduser("~/.local/state"), APP_NAME)
+    return _validate_path_within_user_home(default_path, "state root")
 
 
 def get_monitor_home(repo_root: Optional[str] = None) -> str:

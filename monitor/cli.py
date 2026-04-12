@@ -197,16 +197,35 @@ def _render_notifications_text(payload: Dict[str, object]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _path_is_within(base: str, candidate: str) -> bool:
+    return candidate == base or candidate.startswith(base + os.sep)
+
+
 def _render_monitor_log_text(log_path: str, lines: int) -> str:
-    log_path = os.path.abspath(log_path)
-    if "\x00" in log_path or os.path.islink(log_path):
+    log_path = os.path.abspath(os.path.expanduser(log_path))
+    if "\x00" in log_path:
         return f"Refusing to read log from unsafe path: {log_path}\n"
-    if not os.path.exists(log_path):
+    if os.path.lexists(log_path) and os.path.islink(log_path):
+        return f"Refusing to read log from unsafe path: {log_path}\n"
+
+    # Check intermediate path components for symlinks escaping user home
+    home_real = os.path.realpath(os.path.expanduser("~"))
+    resolved_path = os.path.realpath(log_path)
+    if _path_is_within(home_real, log_path) or _path_is_within(home_real, resolved_path):
+        current = os.path.dirname(log_path)
+        while current != os.path.dirname(current):
+            if os.path.islink(current):
+                target_real = os.path.realpath(current)
+                if not _path_is_within(home_real, target_real):
+                    return f"Refusing to read log from unsafe path: {log_path}\n"
+            current = os.path.dirname(current)
+
+    if not os.path.exists(resolved_path):
         return f"Monitor log not found: {log_path}\n"
 
     max_lines = max(int(lines), 1)
     tail_lines = deque(maxlen=max_lines)
-    with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+    with open(resolved_path, "r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
             tail_lines.append(line.rstrip("\n"))
 
