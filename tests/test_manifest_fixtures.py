@@ -9,10 +9,10 @@ FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "manifests")
 
 
 EXPECTED_PACKAGES = {
-    "package.json": [("lodash", "4.17.21"), ("jest", "29.7.0")],
-    "package-lock.json": [("lodash", "4.17.21")],
-    "yarn.lock": [("lodash", "4.17.21")],
-    "pnpm-lock.yaml": [("lodash", "4.17.21")],
+    "package.json": [("lodash", "4.18.0"), ("jest", "29.7.0")],
+    "package-lock.json": [("lodash", "4.18.0")],
+    "yarn.lock": [("lodash", "4.18.0")],
+    "pnpm-lock.yaml": [("lodash", "4.18.0")],
     "requirements.txt": [("requests", "2.32.0"), ("flask", "")],
     "setup.py": [("requests", "2.32.0")],
     "pyproject.toml": [("requests", ""), ("flask", "3.0.0")],

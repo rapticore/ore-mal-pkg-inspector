@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from typing import Dict
 
@@ -246,6 +247,11 @@ class Notifier:
         if not webhook_url:
             return
 
+        parsed = urllib.parse.urlparse(webhook_url)
+        if parsed.scheme not in ("http", "https"):
+            logger.warning("OreWatch webhook skipped: unsupported URL scheme %r", parsed.scheme)
+            return
+
         webhook_format = str(notifications_config.get("webhook_format", "generic") or "generic").strip().lower()
         if webhook_format == "slack":
             payload = {"text": message}
@@ -260,6 +266,11 @@ class Notifier:
         headers = {"Content-Type": "application/json"}
         configured_headers = notifications_config.get("webhook_headers", {}) or {}
         if isinstance(configured_headers, dict):
+            for key, value in configured_headers.items():
+                str_key, str_value = str(key), str(value)
+                if "\r" in str_key or "\n" in str_key or "\r" in str_value or "\n" in str_value:
+                    logger.warning("OreWatch webhook skipped: header injection detected in %r", str_key)
+                    return
             headers.update({str(key): str(value) for key, value in configured_headers.items()})
 
         request = urllib.request.Request(

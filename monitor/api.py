@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 SUPPORTED_CLIENT_TYPES = {"claude_code", "codex", "cursor", "vscode", "jetbrains", "xcode"}
 SUPPORTED_SOURCE_KINDS = ("agent_command", "ide_action")
+SOURCE_KIND_ALIASES = {"file_path": "ide_action"}
 DEPENDENCY_ALLOWED_FIELDS = {
     "name",
     "requested_spec",
@@ -160,7 +161,8 @@ def _validate_dependencies(dependencies: Any, required: bool) -> None:
         normalize_dependency_input(dependency)
 
 
-def _validate_source(source: Any) -> None:
+def normalize_source_input(source: Any) -> Dict[str, Any]:
+    """Validate and normalize a dependency-check source payload."""
     if not isinstance(source, dict):
         raise ValueError("source is required")
 
@@ -172,12 +174,26 @@ def _validate_source(source: Any) -> None:
             f"allowed fields: {allowed}"
         )
 
-    kind = source.get("kind")
-    if kind not in SUPPORTED_SOURCE_KINDS:
+    kind = str(source.get("kind", "")).strip()
+    normalized_kind = SOURCE_KIND_ALIASES.get(kind, kind)
+    file_path = str(source.get("file_path", "") or "").strip()
+    command = str(source.get("command", "") or "").strip()
+
+    if kind == "file_path" and not file_path:
+        raise ValueError("source.file_path is required when source.kind is 'file_path'")
+
+    if normalized_kind not in SUPPORTED_SOURCE_KINDS:
         expected = ", ".join(SUPPORTED_SOURCE_KINDS)
         raise ValueError(f"Unsupported source.kind '{kind}'; expected one of: {expected}")
-    if kind == "agent_command" and not str(source.get("command", "")).strip():
+    if normalized_kind == "agent_command" and not command:
         raise ValueError("source.command is required when source.kind is 'agent_command'")
+
+    normalized = {"kind": normalized_kind}
+    if file_path:
+        normalized["file_path"] = file_path
+    if command:
+        normalized["command"] = command
+    return normalized
 
 
 def validate_client_request(payload: Dict[str, Any], manifest: bool = False) -> None:
@@ -210,7 +226,7 @@ def validate_client_request(payload: Dict[str, Any], manifest: bool = False) -> 
     if payload.get("operation") not in {"add", "install", "update"}:
         raise ValueError("Unsupported operation")
 
-    _validate_source(payload.get("source"))
+    normalize_source_input(payload.get("source"))
 
 
 def monitor_api_request(
@@ -223,6 +239,9 @@ def monitor_api_request(
 ) -> Dict[str, Any]:
     """Call the local monitor HTTP API."""
     url = urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported URL scheme: {parsed_url.scheme!r} (only http/https allowed)")
     body = None
     headers = {"Authorization": f"Bearer {token}"}
     if payload is not None:
@@ -281,8 +300,10 @@ class _MonitorAPIHandler(BaseHTTPRequestHandler):
             raise ValueError("Request body must be valid JSON") from exc
 
     def _authorize(self) -> bool:
+        import hmac
         expected = f"Bearer {self.server.api_token}"
-        if self.headers.get("Authorization", "") != expected:
+        provided = self.headers.get("Authorization", "")
+        if not hmac.compare_digest(provided, expected):
             self._write_json(401, {"error": "Unauthorized"})
             return False
         return True

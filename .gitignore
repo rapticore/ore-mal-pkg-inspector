@@ -14,6 +14,11 @@ dist/
 env/
 .claude/
 .cursor/
+!.cursor/
+.cursor/*
+!.cursor/rules/
+.cursor/rules/*
+!.cursor/rules/orewatch-dependency-checks.mdc
 .idea/
 tmp/
 .DS_Store

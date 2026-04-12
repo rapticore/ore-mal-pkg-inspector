@@ -16,6 +16,10 @@ from packaging.requirements import InvalidRequirement, Requirement
 from scanners.supported_files import get_manifest_for_filename
 
 
+# Maximum file size (in bytes) to process with regex-based parsers.
+# Files larger than this are skipped to prevent ReDoS on crafted input.
+_MAX_PARSE_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
 SKIPPED_REQUIREMENT_PREFIXES = (
     "-r",
     "--",
@@ -189,8 +193,12 @@ def _find_package_location_in_json(
     Returns:
         Dict with start_line, start_column, end_line, end_column or None
     """
+    # Limit input size to prevent ReDoS on crafted manifests.
+    max_lines = _MAX_PARSE_FILE_BYTES // 80  # approximate line count cap
     in_section = False
     for i, line in enumerate(lines, start=1):
+        if i > max_lines:
+            break
         if f'"{section}"' in line and "{" in line:
             in_section = True
             continue
@@ -660,8 +668,12 @@ def _find_maven_dependency_location(
     Returns:
         Dict with start_line, start_column, end_line, end_column or None
     """
+    # Limit input size to prevent ReDoS on crafted manifests.
+    max_lines = _MAX_PARSE_FILE_BYTES // 80
     pattern = rf"<artifactId>({re.escape(artifact_id)})</artifactId>"
     for i, line in enumerate(xml_lines, start=1):
+        if i > max_lines:
+            break
         match = re.search(pattern, line)
         if match:
             return {
@@ -817,9 +829,12 @@ def parse_rubygems_dependencies(file_path: str) -> List[Dict[str, str]]:
     packages = []
 
     try:
+        file_size = os.path.getsize(file_path)
+        if file_size > _MAX_PARSE_FILE_BYTES:
+            return packages
         with open(file_path, "r", encoding="utf-8") as f:
             content = f.read()
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         return packages
 
     gem_pattern = r'gem\s+["\']([^"\']+)["\'](?:\s*,\s*["\']([^"\']+)["\'])?'

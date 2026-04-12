@@ -61,19 +61,48 @@ def _ensure_openssl_available() -> None:
         raise RuntimeError("OpenSSL is required for public-key snapshot signing")
 
 
-def _read_bytes(source: str) -> bytes:
+def _read_bytes(source: str, max_bytes: Optional[int] = None) -> bytes:
     """Read bytes from a local path or URL."""
     parsed = urllib.parse.urlparse(source)
-    if parsed.scheme in ("http", "https", "file"):
+    if parsed.scheme in ("http", "https"):
         with urllib.request.urlopen(source, timeout=30) as response:
+            if max_bytes is not None:
+                data = response.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    raise ValueError(
+                        f"Response from {source} exceeds maximum allowed size of {max_bytes} bytes"
+                    )
+                return data
             return response.read()
+    if parsed.scheme == "file":
+        local_path = urllib.request.url2pathname(parsed.path)
+        with open(local_path, "rb") as handle:
+            if max_bytes is not None:
+                data = handle.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    raise ValueError(
+                        f"File {source} exceeds maximum allowed size of {max_bytes} bytes"
+                    )
+                return data
+            return handle.read()
     with open(source, "rb") as handle:
+        if max_bytes is not None:
+            data = handle.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                raise ValueError(
+                    f"File {source} exceeds maximum allowed size of {max_bytes} bytes"
+                )
+            return data
         return handle.read()
+
+
+_MAX_JSON_BYTES = 50 * 1024 * 1024  # 50 MB safety limit for JSON payloads
 
 
 def _read_json(source: str) -> Dict:
     """Read JSON from a local path or URL."""
-    return json.loads(_read_bytes(source).decode("utf-8"))
+    raw = _read_bytes(source, max_bytes=_MAX_JSON_BYTES)
+    return json.loads(raw.decode("utf-8"))
 
 
 def _resolve_relative_source(base_source: str, relative_path: str) -> str:
@@ -514,12 +543,27 @@ class SnapshotUpdater:
     def _prepare_staged_snapshot(self, manifest: Dict, manifest_source: str) -> Tuple[str, str]:
         """Download and validate one snapshot into a staged directory."""
         staged_dir = tempfile.mkdtemp(prefix="snapshot-stage-", dir=self.paths["snapshots"])
+        os.chmod(staged_dir, 0o700)
+
         final_stage_dir = os.path.join(staged_dir, "final-data")
         os.makedirs(final_stage_dir, exist_ok=True)
+
+        if os.path.islink(final_stage_dir):
+            raise ValueError("Symlink detected in staging directory")
+
+        real_stage_dir = os.path.realpath(final_stage_dir)
 
         for entry in manifest.get("files", []):
             entry_source = _resolve_entry_source(manifest_source, entry)
             destination = os.path.join(final_stage_dir, entry["filename"])
+
+            # Validate destination resolves within the staging directory
+            real_destination = os.path.realpath(destination)
+            if not real_destination.startswith(real_stage_dir + os.sep) and real_destination != real_stage_dir:
+                raise ValueError(
+                    f"Path traversal detected: {entry['filename']} resolves outside staging directory"
+                )
+
             with open(destination, "wb") as handle:
                 handle.write(_read_bytes(entry_source))
 

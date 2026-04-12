@@ -142,7 +142,6 @@ Request:
   "dependencies": [
     {
       "name": "chalk",
-      "version": "5.4.1",
       "requested_spec": "5.4.1",
       "resolved_version": "5.4.1",
       "dev_dependency": false
@@ -355,14 +354,23 @@ OreWatch background detections are intentionally available through multiple surf
 
 Desktop and terminal notifications are still best-effort local alert channels, but the supported durable review path is the stored findings/notifications surface above.
 
-On macOS, OreWatch also has a native menu bar app:
+On macOS, OreWatch also has a native menu bar app. Choose the command that
+matches your install method:
 
 ```bash
+# pip / source-checkout install
 python3.14 -m pip install 'orewatch[mac-menubar]'
+
+# existing pipx install
+pipx inject orewatch pyobjc-framework-Cocoa
 orewatch monitor menubar
 ```
 
 `orewatch monitor menubar` relaunches the app in the background by default and returns the terminal immediately. Use `orewatch monitor menubar --foreground` only for debugging.
+
+If you installed OreWatch with Homebrew and want the menu bar app, reinstall it
+with `pipx` or `pip` using `orewatch[mac-menubar]` so the optional Cocoa
+bindings live in the same environment as `orewatch`.
 
 The menu bar app uses the same singleton monitor and findings store. It is an additional native review surface, not a second daemon.
 

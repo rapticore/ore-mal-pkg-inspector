@@ -162,7 +162,7 @@ If you are adopting OreWatch for the first time, pick the smallest path that mat
 |--------------|---------------|------------|
 | scan one repo right now | CLI scan | `orewatch /path/to/project` |
 | protect local development in the background | singleton monitor | `orewatch monitor quickstart /path/to/project --client claude_code` |
-| use OreWatch from Cursor, Claude Code, or Codex | MCP bridge | `orewatch monitor quickstart /path/to/project --client cursor` |
+| use OreWatch from Cursor, Claude Code, or Codex | MCP bridge | `orewatch monitor quickstart /path/to/project --client <cursor|claude_code|codex>` |
 | integrate with VS Code, PyCharm, or Xcode | localhost API | `orewatch monitor quickstart /path/to/project --client vscode` |
 | get visible macOS alerts and a native review surface | menu bar app | `orewatch monitor menubar` |
 | validate builds in CI | one-off CLI scan | `orewatch . --strict-data` |
@@ -190,36 +190,166 @@ If you want a shorter setup guide with copy-paste commands, use [docs/adoption-g
 
 ### Installation
 
-**Release install for end users:**
+OreWatch can be installed via **pipx** (recommended), **Homebrew** (macOS),
+**pip**, or from **source**. All methods produce the `orewatch` CLI command.
+
+#### Option 1 — pipx (Recommended)
+
+[pipx](https://pypa.github.io/pipx/) installs OreWatch into its own isolated
+environment while making the `orewatch` command available globally. This is the
+best option for most developers.
 
 ```bash
-# Recommended isolated install for developers
-pipx install orewatch
+# Install pipx if you don't have it
+python3.14 -m pip install --user pipx
+python3.14 -m pipx ensurepath
 
-# macOS Homebrew tap
-brew install rapticore/tap/orewatch
+# Install OreWatch
+pipx install --python python3.14 orewatch
+
+# If you want the macOS menu bar app on a fresh install, use this instead:
+# pipx install --python python3.14 'orewatch[mac-menubar]'
+
+# Verify
+orewatch --help
 ```
 
-**Source checkout for contributors:**
+If you already installed `orewatch` with pipx and want to add the macOS menu
+bar app later, inject the Cocoa bindings into the same pipx environment:
+
+```bash
+pipx inject orewatch pyobjc-framework-Cocoa
+```
+
+**Upgrade:**
+
+```bash
+pipx upgrade orewatch
+```
+
+**Uninstall:**
+
+```bash
+pipx uninstall orewatch
+```
+
+#### Option 2 — Homebrew (macOS)
+
+For macOS users who prefer Homebrew-managed installs:
+
+```bash
+# Add the OreWatch tap
+brew tap rapticore/tap
+
+# Install
+brew install rapticore/tap/orewatch
+
+# Verify
+orewatch --help
+```
+
+**Upgrade:**
+
+```bash
+brew update && brew upgrade orewatch
+```
+
+**Uninstall:**
+
+```bash
+brew uninstall orewatch
+brew untap rapticore/tap   # optional — removes the tap
+```
+
+> **Note:** The Homebrew formula tracks the published PyPI release. If you also
+> want the macOS menu bar app, install OreWatch with `pipx` or `pip` using
+> `orewatch[mac-menubar]` instead. The optional Cocoa bindings must live in the
+> same Python environment as the `orewatch` command.
+
+#### Option 3 — pip
+
+Use `pip` for CI pipelines, Docker images, or when you manage your own
+virtualenvs:
+
+```bash
+# Install into an active Python 3.14 virtualenv or user site
+python3.14 -m pip install orewatch
+
+# Pin a version for reproducible CI builds
+python3.14 -m pip install orewatch==1.2.0
+
+# If you want the macOS menu bar app on a fresh install, use this instead:
+# python3.14 -m pip install 'orewatch[mac-menubar]'
+
+# Verify
+orewatch --help
+```
+
+**Upgrade:**
+
+```bash
+python3.14 -m pip install --upgrade orewatch
+```
+
+#### Option 4 — Source Checkout (Contributors)
 
 ```bash
 # Clone the repository
 git clone https://github.com/rapticore/ore-mal-pkg-inspector.git
 cd ore-mal-pkg-inspector
 
-# Create and activate virtual environment (recommended)
-python3 -m venv .venv
+# Create and activate a Python 3.14 virtual environment (recommended)
+python3.14 -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install the project and its CLI entry point
-pip install .
+# Install in editable mode for development
+python -m pip install -e .
+
+# Verify
+orewatch --help
 ```
+
+#### Post-Install Verification
+
+After installing with any method, confirm OreWatch is working:
+
+```bash
+# Check the CLI is accessible
+orewatch --help
+
+# List supported manifest filenames
+orewatch --list-supported-files
+
+# Run a quick scan on the current directory
+orewatch .
+```
+
+#### Platform Notes
+
+| Platform | Python Source | Notes |
+|---|---|---|
+| **macOS** (Homebrew Python) | `brew install python@3.14` | Recommended for Homebrew users |
+| **macOS** (pyenv) | `pyenv install 3.14` | Best for multi-version setups |
+| **Ubuntu / Debian** | `sudo apt install python3.14` or pyenv | Check your distro ships 3.14+ |
+| **Fedora / RHEL** | `sudo dnf install python3.14` or pyenv | — |
+| **Windows (WSL)** | pyenv or system package | Native Windows is untested |
+
+> **Python 3.14 is required.** OreWatch uses language features introduced in
+> Python 3.14. Older versions will fail at import time.
+
+#### Troubleshooting Installation
+
+| Symptom | Fix |
+|---|---|
+| `command not found: orewatch` | Ensure the install location is on your `PATH`. For pipx: run `pipx ensurepath` and restart your shell. |
+| `ModuleNotFoundError` on import | You may have multiple Python versions. Confirm the runtime behind `orewatch` is Python 3.14+ and reinstall with the matching interpreter. |
+| pipx install fails with resolver errors | Upgrade pipx: `python3.14 -m pip install --upgrade pipx` |
+| Homebrew `orewatch` not found after install | Run `brew tap rapticore/tap` first, then retry the install. |
+| Permission denied during pip install | Use `pip install --user orewatch` or install inside a virtualenv. |
 
 _Note: If local threat data is missing or stale, package scans stage a live-update candidate and only promote it after anomaly gates pass. If the candidate looks suspicious, OreWatch keeps the last-known-good dataset active._
 
-_Note: The `pipx` and Homebrew commands above are the recommended end-user install paths. The source-checkout flow below them remains the development and contributor path. See [Distribution](#distribution) for the release model details._
-
-_Installed CLI:_ `orewatch`  
+_Installed CLI:_ `orewatch`
 _Compatibility alias:_ `ore-mal-pkg-inspector`
 
 ### First Scan
@@ -294,8 +424,8 @@ orewatch .
 # Specific directory
 orewatch /home/user/projects/my-app
 
-# With absolute path
-orewatch ~/projects/backend-api
+# With an absolute path
+orewatch /home/user/projects/backend-api
 ```
 
 **Scan Specific Dependency Files:**
@@ -517,8 +647,8 @@ orewatch monitor mcp
 
 Recommended setup:
 
-1. Run `orewatch monitor quickstart /path/to/project --client cursor` once.
-2. Copy the printed MCP block into Cursor, Claude Code, or Codex.
+1. Run `orewatch monitor quickstart /path/to/project --client <cursor|claude_code|codex>` once.
+2. Copy the printed MCP block into the matching MCP client.
 3. Open a watched project in that client.
 4. Let the client call OreWatch over MCP for:
    - `orewatch_health`
@@ -628,10 +758,15 @@ This is the supported path for IDEs, MCP clients, and coding agents to surface b
 
 OreWatch now includes a macOS-native menu bar app for people who want a visible local UI instead of relying only on CLI commands, MCP polling, or best-effort Notification Center popups.
 
-Install the optional Cocoa bindings once on macOS:
+Install the optional Cocoa bindings into the same runtime that provides the
+`orewatch` command. Choose the command that matches your install method:
 
 ```bash
+# pip / source-checkout install
 python3.14 -m pip install 'orewatch[mac-menubar]'
+
+# existing pipx install
+pipx inject orewatch pyobjc-framework-Cocoa
 ```
 
 Then launch the menu bar app:
@@ -643,6 +778,10 @@ orewatch monitor menubar
 By default, `monitor menubar` relaunches the app in the background and returns your shell prompt immediately. Use `orewatch monitor menubar --foreground` only when you explicitly want to keep it attached to the terminal for debugging.
 
 The menu bar app attaches to the same singleton monitor. It does not start a second monitor instance. If the monitor is not already installed and running, the app will install/start it on first launch.
+
+If you installed OreWatch with Homebrew and want the menu bar app, reinstall
+OreWatch with `pipx` or `pip` using the `mac-menubar` extra. Installing the
+extra into a separate Python environment will not enable `orewatch monitor menubar`.
 
 When desktop notifications are enabled on macOS, the singleton watcher now keeps one singleton menu bar app alive and uses it as the primary popup surface. That avoids relying only on a detached `osascript` invocation from the daemon and gives you a persistent native UI for new findings.
 
@@ -664,7 +803,7 @@ What the macOS menu bar app gives you:
 Recommended Mac flow:
 
 1. Run `orewatch monitor quickstart /path/to/project --client claude_code` once.
-2. Install the optional bindings with `python3.14 -m pip install 'orewatch[mac-menubar]'`.
+2. Install the optional bindings into the same environment as `orewatch`.
 3. Launch `orewatch monitor menubar`.
 4. Keep the menu bar app running for a persistent native review surface while your IDEs and coding agents continue using MCP or the local API.
 
@@ -824,15 +963,15 @@ They should be distributed separately.
 Why this is the best fit:
 - The project is a Python CLI and background monitor, so a universal wheel plus source distribution is the most direct release artifact.
 - `pipx` gives developers an isolated, user-level install without polluting project virtualenvs.
-- CI can still install the same version with `pip install orewatch==<version>`.
+- CI can still install the same version with `python3.14 -m pip install orewatch==<version>`.
 - This keeps the CLI upgrade path simple while leaving threat-data updates to the signed snapshot channel.
 
 **Recommended release shape:**
 - Publish `sdist` and universal wheel artifacts to PyPI.
 - Expose the `orewatch` console entry point.
 - Keep `ore-mal-pkg-inspector` as a temporary compatibility alias.
-- Document `pipx install orewatch` for local developer installs.
-- Document `pip install orewatch==<version>` for CI and pinned automation.
+- Document `pipx install --python python3.14 orewatch` for local developer installs.
+- Document `python3.14 -m pip install orewatch==<version>` for CI and pinned automation.
 
 **Available secondary channel:** the Homebrew tap is now live for macOS users who prefer Brew-managed installs:
 
@@ -847,9 +986,9 @@ Homebrew remains a convenience layer over the published PyPI release, not the pr
 ```bash
 git clone https://github.com/rapticore/ore-mal-pkg-inspector.git
 cd ore-mal-pkg-inspector
-python3 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install -e .
 ```
 
 ### Managed macOS Rollout
@@ -1178,7 +1317,7 @@ pipeline {
                 sh '''
                     git clone https://github.com/rapticore/ore-mal-pkg-inspector.git scanner
                     cd scanner
-                    python3 -m pip install .
+                    python3.14 -m pip install .
                 '''
             }
         }

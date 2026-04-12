@@ -10,11 +10,14 @@ import logging
 from typing import List, Optional, Dict, Any
 
 # Add current directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_collectors_dir = os.path.dirname(os.path.abspath(__file__))
+if _collectors_dir not in sys.path:
+    sys.path.insert(0, _collectors_dir)
 
 # Import logging config from parent directory
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, parent_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 from logging_config import setup_logging
 
 import utils
@@ -196,7 +199,10 @@ def run_collector(
             return result
             
     except Exception as e:
-        logger.error("✗ %s failed with error: %s", name, e)
+        # Sanitize the error message to prevent log injection via crafted
+        # exception strings (e.g. newline/control characters).
+        safe_error = str(e).replace("\n", " ").replace("\r", " ")[:500]
+        logger.error("✗ %s failed with error: %s", name, safe_error)
         # Save error result
         utils.save_json({
             "source": source_key,
@@ -205,7 +211,7 @@ def run_collector(
             "total_packages": 0,
             "ecosystems": [],
             "packages": [],
-            "error": str(e)
+            "error": safe_error
         }, output_path)
         result['error'] = str(e)
         return result

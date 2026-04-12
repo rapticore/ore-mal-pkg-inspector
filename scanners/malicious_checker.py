@@ -9,8 +9,10 @@ import re
 import sys
 import logging
 import hashlib
-import urllib.request
+import sqlite3
 import urllib.error
+import urllib.parse
+import urllib.request
 import yaml
 from typing import List, Dict, Optional, Set
 from pathlib import Path
@@ -47,19 +49,13 @@ class MaliciousPackageChecker:
 
         self.collectors_dir = collectors_dir
         self.final_data_dir = final_data_dir or os.path.join(collectors_dir, 'final-data')
-        self._db_cache = {}  # Cache database connections per ecosystem
         self._shai_hulud_cache = None  # Cache for Shai-Hulud affected packages
         self._shai_hulud_loaded = False
         self.github_yaml_url = "https://raw.githubusercontent.com/rapticore/OreNPMGuard/main/affected_packages.yaml"
 
     def close(self) -> None:
-        """Close cached SQLite connections."""
-        for conn in self._db_cache.values():
-            try:
-                conn.close()
-            except Exception:
-                pass
-        self._db_cache = {}
+        """Release transient resources held by the checker."""
+        return None
 
     def __del__(self):
         try:
@@ -69,7 +65,7 @@ class MaliciousPackageChecker:
 
     def _get_db_connection(self, ecosystem: str):
         """
-        Get cached database connection for ecosystem.
+        Open a read-only database connection for one lookup pass.
 
         Args:
             ecosystem: Ecosystem name (npm, pypi, etc.)
@@ -77,16 +73,40 @@ class MaliciousPackageChecker:
         Returns:
             Database connection or None if not found
         """
-        if ecosystem in self._db_cache:
-            return self._db_cache[ecosystem]
-
         db_path = os.path.join(self.final_data_dir, f'unified_{ecosystem}.db')
-        conn = db.open_database(db_path)
+        return db.open_database(db_path)
 
-        if conn:
-            self._db_cache[ecosystem] = conn
+    def _check_packages_with_connection(
+        self,
+        conn,
+        packages: List[Dict[str, str]],
+        ecosystem: str,
+    ) -> List[Dict]:
+        """Run package lookups with one open SQLite connection."""
+        malicious_found = []
+        for pkg in packages:
+            pkg_name = pkg.get('name', '')
+            pkg_version = pkg.get('version', '')
 
-        return conn
+            if not pkg_name:
+                continue
+
+            # RubyGems treats "-" and "_" interchangeably, so query both forms.
+            result = None
+            for candidate_name in self._lookup_names_for_ecosystem(ecosystem, pkg_name):
+                result = db.check_package(conn, candidate_name, pkg_version)
+                if result:
+                    if result.get('name') != pkg_name:
+                        result['matched_name'] = result.get('name')
+                        result['name'] = pkg_name
+                    break
+            if result:
+                result['ecosystem'] = ecosystem
+                # Preserve SARIF locations from input package
+                if 'locations' in pkg:
+                    result['locations'] = pkg['locations']
+                malicious_found.append(result)
+        return malicious_found
     
     def _normalize_package_name(self, name: str) -> str:
         """
@@ -149,11 +169,31 @@ class MaliciousPackageChecker:
                 self._shai_hulud_loaded = True
                 return self._shai_hulud_cache
         
+        # Validate schema before trusting the parsed YAML (CWE-502)
+        if not isinstance(config, dict):
+            logger.warning("Shai-Hulud config is not a dict; ignoring")
+            self._shai_hulud_cache = {}
+            self._shai_hulud_loaded = True
+            return self._shai_hulud_cache
+
+        affected_packages = config.get('affected_packages')
+        if not isinstance(affected_packages, list):
+            logger.warning("Shai-Hulud config 'affected_packages' is not a list; ignoring")
+            self._shai_hulud_cache = {}
+            self._shai_hulud_loaded = True
+            return self._shai_hulud_cache
+
         # Parse the configuration and cache it
         packages = {}
-        if config:
-            for pkg in config.get('affected_packages', []):
-                packages[pkg['name']] = set(pkg['versions'])
+        for pkg in affected_packages:
+            if (
+                not isinstance(pkg, dict)
+                or not isinstance(pkg.get('name'), str)
+                or not isinstance(pkg.get('versions'), list)
+            ):
+                logger.warning("Shai-Hulud config entry has invalid schema; skipping: %s", pkg)
+                continue
+            packages[pkg['name']] = set(pkg['versions'])
         
         self._shai_hulud_cache = packages
         self._shai_hulud_loaded = True
@@ -178,13 +218,33 @@ class MaliciousPackageChecker:
             return None
 
         try:
+            parsed_url = urllib.parse.urlparse(self.github_yaml_url)
+            if parsed_url.scheme not in ("http", "https"):
+                raise ValueError(f"Unsupported URL scheme: {parsed_url.scheme!r} (only http/https allowed)")
             req = urllib.request.Request(
                 self.github_yaml_url,
                 headers={'User-Agent': 'OreNPMGuard-Scanner/1.0'}
             )
-            
+
+            max_download_size = 5 * 1024 * 1024  # 5 MB
+
             with urllib.request.urlopen(req, timeout=10) as response:
-                raw_content = response.read()
+                # CWE-400: enforce download size limit
+                content_length = response.headers.get('Content-Length')
+                if content_length is not None and int(content_length) > max_download_size:
+                    logger.warning(
+                        "Remote Shai-Hulud feed too large (Content-Length: %s); refusing download",
+                        content_length,
+                    )
+                    return None
+
+                raw_content = response.read(max_download_size + 1)
+                if len(raw_content) > max_download_size:
+                    logger.warning(
+                        "Remote Shai-Hulud feed exceeds %d byte limit; discarding",
+                        max_download_size,
+                    )
+                    return None
                 digest = hashlib.sha256(raw_content).hexdigest()
                 if digest != expected_sha256:
                     logger.warning(
@@ -325,35 +385,39 @@ class MaliciousPackageChecker:
         """
         malicious_found = []
 
-        # Get database connection
         conn = self._get_db_connection(ecosystem)
-
-        if conn:
-            # Check each package using SQLite
-            for pkg in packages:
-                pkg_name = pkg.get('name', '')
-                pkg_version = pkg.get('version', '')
-
-                if not pkg_name:
-                    continue
-
-                # RubyGems treats "-" and "_" interchangeably, so query both forms.
-                result = None
-                for candidate_name in self._lookup_names_for_ecosystem(ecosystem, pkg_name):
-                    result = db.check_package(conn, candidate_name, pkg_version)
-                    if result:
-                        if result.get('name') != pkg_name:
-                            result['matched_name'] = result.get('name')
-                            result['name'] = pkg_name
-                        break
-                if result:
-                    result['ecosystem'] = ecosystem
-                    # Preserve SARIF locations from input package
-                    if 'locations' in pkg:
-                        result['locations'] = pkg['locations']
-                    malicious_found.append(result)
-        else:
+        if conn is None:
             logger.warning("Database not found for ecosystem: %s", ecosystem)
+        else:
+            try:
+                malicious_found.extend(
+                    self._check_packages_with_connection(conn, packages, ecosystem)
+                )
+            except sqlite3.Error as exc:
+                logger.warning(
+                    "SQLite lookup failed for ecosystem %s; reopening read-only database once: %s",
+                    ecosystem,
+                    exc,
+                )
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                retry_conn = self._get_db_connection(ecosystem)
+                if retry_conn is None:
+                    logger.warning("Database disappeared for ecosystem: %s", ecosystem)
+                else:
+                    try:
+                        malicious_found.extend(
+                            self._check_packages_with_connection(retry_conn, packages, ecosystem)
+                        )
+                    finally:
+                        retry_conn.close()
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
         # Also check against Shai-Hulud affected packages for npm ecosystem
         if include_shai_hulud and ecosystem == 'npm':

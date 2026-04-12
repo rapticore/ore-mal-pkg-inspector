@@ -8,7 +8,7 @@ This guide is for teams and individual developers who want to get OreWatch runni
 |-------------------|-----|------------|
 | scan a repo once | CLI scan | `orewatch /path/to/project` |
 | keep projects watched in the background | singleton monitor | `orewatch monitor quickstart /path/to/project --client claude_code` |
-| protect Cursor, Claude Code, or Codex sessions | MCP bridge | `orewatch monitor quickstart /path/to/project --client cursor` |
+| protect Cursor, Claude Code, or Codex sessions | MCP bridge | `orewatch monitor quickstart /path/to/project --client <cursor|claude_code|codex>` |
 | integrate with VS Code, PyCharm, or Xcode | localhost API | `orewatch monitor quickstart /path/to/project --client vscode` |
 | get visible macOS alerts | menu bar app | `orewatch monitor menubar` |
 
@@ -19,9 +19,9 @@ This guide is for teams and individual developers who want to get OreWatch runni
 ```bash
 git clone https://github.com/rapticore/ore-mal-pkg-inspector.git
 cd ore-mal-pkg-inspector
-python3 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
-pip install .
+python -m pip install .
 ```
 
 ### 2. Start the singleton monitor
@@ -140,12 +140,21 @@ Current boundary:
 
 ## macOS menu bar app
 
-If you want a native local UI and popup notifications on macOS:
+If you want a native local UI and popup notifications on macOS, choose the
+command that matches your install method:
 
 ```bash
+# pip / source-checkout install
 python3.14 -m pip install 'orewatch[mac-menubar]'
+
+# existing pipx install
+pipx inject orewatch pyobjc-framework-Cocoa
 orewatch monitor menubar
 ```
+
+If you installed OreWatch with Homebrew and want the menu bar app, reinstall it
+with `pipx` or `pip` using `orewatch[mac-menubar]` so the Cocoa bindings live
+in the same environment as `orewatch`.
 
 What you get:
 

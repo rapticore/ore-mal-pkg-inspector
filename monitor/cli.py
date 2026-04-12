@@ -198,6 +198,9 @@ def _render_notifications_text(payload: Dict[str, object]) -> str:
 
 
 def _render_monitor_log_text(log_path: str, lines: int) -> str:
+    log_path = os.path.abspath(log_path)
+    if "\x00" in log_path or os.path.islink(log_path):
+        return f"Refusing to read log from unsafe path: {log_path}\n"
     if not os.path.exists(log_path):
         return f"Monitor log not found: {log_path}\n"
 

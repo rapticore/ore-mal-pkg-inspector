@@ -13,6 +13,11 @@ from typing import List, Dict, Optional, Set
 # Module logger
 logger = logging.getLogger(__name__)
 
+# Maximum file size (in bytes) to read into memory for scanning.
+# Files larger than this are skipped to prevent resource exhaustion (CWE-400)
+# and to bound regex evaluation time (CWE-1333).
+_MAX_SCAN_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
 
 # Shai-Hulud IoCs (Indicators of Compromise)
 # Includes both original Shai-Hulud (September 2025) and Shai-Hulud 2.0 (November 2025) patterns
@@ -132,7 +137,10 @@ def scan_for_iocs(directory: str) -> List[Dict]:
             package_json_path = os.path.join(root, 'package.json')
             try:
                 with open(package_json_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
+                    content = f.read(_MAX_SCAN_FILE_BYTES + 1)
+                    if len(content) > _MAX_SCAN_FILE_BYTES:
+                        logger.warning("Skipping %s: file exceeds %d byte scan limit", package_json_path, _MAX_SCAN_FILE_BYTES)
+                        continue
 
                     # Check for malicious postinstall pattern (original Shai-Hulud)
                     if re.search(SHAI_HULUD_IOCS['postinstall_pattern'], content):
@@ -173,8 +181,11 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                     workflow_path = os.path.join(root, file)
                     try:
                         with open(workflow_path, 'r', encoding='utf-8') as f:
-                            workflow_content = f.read()
-                            
+                            workflow_content = f.read(_MAX_SCAN_FILE_BYTES + 1)
+                            if len(workflow_content) > _MAX_SCAN_FILE_BYTES:
+                                logger.warning("Skipping %s: file exceeds %d byte scan limit", workflow_path, _MAX_SCAN_FILE_BYTES)
+                                continue
+
                             # Check for discussion.yaml pattern
                             if re.search(SHAI_HULUD_IOCS['github_workflow_patterns']['discussion_yaml'], 
                                        workflow_path.replace('\\', '/')):
@@ -237,8 +248,11 @@ def scan_for_iocs(directory: str) -> List[Dict]:
                 file_path = os.path.join(root, file)
                 try:
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                        
+                        content = f.read(_MAX_SCAN_FILE_BYTES + 1)
+                        if len(content) > _MAX_SCAN_FILE_BYTES:
+                            logger.warning("Skipping %s: file exceeds %d byte scan limit", file_path, _MAX_SCAN_FILE_BYTES)
+                            continue
+
                         # Check for webhook.site URL references
                         if SHAI_HULUD_IOCS['webhook_url'] in content:
                             iocs_found.append({

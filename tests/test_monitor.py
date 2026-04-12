@@ -3,11 +3,13 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import urllib.parse
 from unittest.mock import Mock, patch
@@ -37,6 +39,7 @@ from monitor.menubar import count_unacknowledged_alert_notifications
 from monitor.menubar import format_notification_context
 from monitor.menubar import latest_attention_notification
 from monitor.menubar import notification_requires_attention
+from monitor.menubar import orewatch_version_label
 from monitor.menubar import _selector
 from monitor.mcp_adapter import MCPBridge
 from monitor.mcp_adapter import _read_message
@@ -232,6 +235,21 @@ class MonitorTests(unittest.TestCase):
             ):
                 with self.assertRaises(RuntimeError):
                     MonitorService(repo_root)
+
+    def test_monitor_service_allows_tempdir_user_roots(self):
+        with tempfile.TemporaryDirectory() as repo_root, tempfile.TemporaryDirectory() as config_root, tempfile.TemporaryDirectory() as state_root:
+            with patch.dict(
+                os.environ,
+                {
+                    "OREWATCH_CONFIG_HOME": config_root,
+                    "OREWATCH_STATE_HOME": state_root,
+                },
+                clear=False,
+            ):
+                service = MonitorService(repo_root)
+
+            self.assertTrue(service.paths["config_home"].startswith(os.path.realpath(config_root)))
+            self.assertTrue(service.paths["state_home"].startswith(os.path.realpath(state_root)))
 
     def test_project_policy_file_is_ignored_by_default(self):
         with tempfile.TemporaryDirectory() as project_dir:
@@ -592,9 +610,12 @@ class MonitorTests(unittest.TestCase):
 
         self.assertEqual(build_menu_bar_title(snapshot), "OW!2")
         tooltip = build_menu_bar_tooltip(snapshot)
-        self.assertIn("OreWatch monitor running", tooltip)
+        self.assertIn(f"{orewatch_version_label()} monitor running", tooltip)
         self.assertIn("Watched projects: 3", tooltip)
         self.assertIn("Top finding: Malicious package badpkg@1.0.0", tooltip)
+
+    def test_orewatch_version_label_includes_current_version(self):
+        self.assertRegex(orewatch_version_label(), r"^OreWatch v\d+\.\d+\.\d+$")
 
     def test_menu_bar_title_switches_to_alert_state_for_unacknowledged_notifications(self):
         snapshot = MenuBarSnapshot(
@@ -1456,6 +1477,20 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0]["last_report_path"], "/tmp/report-c.html")
 
+    def test_monitor_state_remove_watched_project_allows_deleted_directories(self):
+        with tempfile.TemporaryDirectory() as state_root:
+            safe_state_root = os.path.realpath(state_root)
+            state = MonitorState(os.path.join(safe_state_root, "state.db"))
+            project_root = tempfile.mkdtemp(dir=safe_state_root)
+            watched_path = os.path.join(project_root, "repo")
+            os.makedirs(watched_path, exist_ok=True)
+
+            state.add_watched_project(watched_path)
+            shutil.rmtree(watched_path)
+            state.remove_watched_project(watched_path)
+
+            self.assertEqual(state.list_watched_projects(), [])
+
     def test_monitor_state_migrates_legacy_findings_primary_key(self):
         with tempfile.TemporaryDirectory() as state_root:
             safe_state_root = os.path.realpath(state_root)
@@ -1655,6 +1690,100 @@ class MonitorTests(unittest.TestCase):
             self.assertIn("supported_ecosystems", health)
             stored = service.state.get_dependency_check(response["check_id"])
             self.assertEqual(stored["client_type"], "codex")
+
+    def test_dependency_add_normalizes_legacy_file_path_source_kind(self):
+        with tempfile.TemporaryDirectory() as repo_root:
+            service = MonitorService(repo_root)
+            manifest_path = os.path.join(repo_root, "requirements.txt")
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                handle.write("requests==2.32.3\n")
+
+            with patch(
+                "monitor.service.get_database_statuses",
+                return_value={
+                    "pypi": {
+                        "usable": True,
+                        "data_status": "complete",
+                        "sources_used": ["openssf", "osv"],
+                        "experimental_sources_used": [],
+                    }
+                },
+            ):
+                with patch.object(service.package_checker, "check_packages", return_value=[]):
+                    response = service.handle_dependency_add_check(
+                        {
+                            "client_type": "codex",
+                            "project_path": repo_root,
+                            "ecosystem": "pypi",
+                            "package_manager": "pip",
+                            "operation": "add",
+                            "dependencies": [{"name": "requests", "version": "2.32.3"}],
+                            "source": {"kind": "file_path", "file_path": manifest_path},
+                        }
+                    )
+
+            self.assertEqual(response["decision"], "allow")
+            stored = service.state.get_dependency_check(response["check_id"])
+            self.assertEqual(stored["source_kind"], "ide_action")
+            self.assertEqual(stored["source_file_path"], manifest_path)
+            self.assertEqual(stored["source_command"], None)
+
+    def test_threaded_dependency_checks_do_not_reuse_sqlite_connections(self):
+        with tempfile.TemporaryDirectory() as repo_root:
+            service = MonitorService(repo_root)
+            final_data_dir = service.paths["final_data_dir"]
+            os.makedirs(final_data_dir, exist_ok=True)
+            db_path = os.path.join(final_data_dir, "unified_pypi.db")
+            conn, temp_db_path = collector_db.create_database(db_path)
+            collector_db.insert_metadata(
+                conn,
+                ecosystem="pypi",
+                packages=[],
+                timestamp="2026-04-09T00:00:00Z",
+                extra_metadata=_build_data_metadata(),
+            )
+            collector_db.finalize_database(conn, temp_db_path, db_path)
+
+            payload = {
+                "client_type": "codex",
+                "project_path": repo_root,
+                "ecosystem": "pypi",
+                "package_manager": "pip",
+                "operation": "add",
+                "dependencies": [
+                    {
+                        "name": "requests",
+                        "requested_spec": "2.32.3",
+                        "resolved_version": "2.32.3",
+                    }
+                ],
+                "source": {"kind": "agent_command", "command": "pip install requests==2.32.3"},
+            }
+
+            responses = []
+            errors = []
+
+            def run_check():
+                try:
+                    responses.append(service.handle_dependency_add_check(dict(payload)))
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            with patch("monitor.service.get_database_statuses", return_value=_build_database_statuses()):
+                first_thread = threading.Thread(target=run_check)
+                second_thread = threading.Thread(target=run_check)
+                first_thread.start()
+                first_thread.join()
+                second_thread.start()
+                second_thread.join()
+
+            service.close()
+
+            self.assertEqual(errors, [])
+            self.assertEqual(len(responses), 2)
+            self.assertEqual(responses[0]["decision"], "allow")
+            self.assertEqual(responses[1]["decision"], "allow")
+            self.assertNotEqual(responses[0]["check_id"], responses[1]["check_id"])
 
     def test_local_api_manifest_check_and_override_flow(self):
         with tempfile.TemporaryDirectory() as repo_root:

@@ -47,7 +47,11 @@ def merge_live_update_config(config: Optional[Dict[str, Any]] = None) -> Dict[st
     """Merge overrides into the default live-update config."""
     merged = copy.deepcopy(DEFAULT_LIVE_UPDATE_CONFIG)
     if config:
-        merged.update(config)
+        # Only accept keys that exist in the default config to prevent
+        # injection of unexpected configuration values.
+        for key, value in config.items():
+            if key in DEFAULT_LIVE_UPDATE_CONFIG:
+                merged[key] = value
     return merged
 
 
@@ -80,7 +84,11 @@ def _load_json(path: str) -> Optional[Dict[str, Any]]:
     if not os.path.exists(path):
         return None
     with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
+        data = json.load(handle)
+    # Validate deserialized data is the expected dict type.
+    if not isinstance(data, dict):
+        return None
+    return data
 
 
 def _normalize_status(status: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -533,6 +541,13 @@ def promote_candidate_directory(
     live_dataset_version: str,
 ) -> Optional[str]:
     """Promote one staged candidate DB directory into the active final-data path."""
+    # Validate paths to prevent traversal attacks.
+    for p in (active_final_data_dir, candidate_final_data_dir, promotion_root):
+        if "\x00" in p:
+            raise ValueError("Null bytes not allowed in paths")
+    candidate_final_data_dir = os.path.abspath(candidate_final_data_dir)
+    active_final_data_dir = os.path.abspath(active_final_data_dir)
+    promotion_root = os.path.abspath(promotion_root)
     layout = ensure_live_update_layout(promotion_root)
     os.makedirs(os.path.dirname(active_final_data_dir), exist_ok=True)
     temp_swap_root = tempfile.mkdtemp(prefix="live-update-swap-", dir=layout["staging"])

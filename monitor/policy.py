@@ -69,6 +69,12 @@ def load_project_policy(project_path: str, monitor_config: Dict) -> Dict:
     with open(policy_path, "r", encoding="utf-8") as handle:
         loaded = yaml.safe_load(handle) or {}
 
+    # Validate the loaded policy is a dict — reject unexpected types from
+    # crafted YAML files (e.g. lists, strings, or nested objects that could
+    # cause downstream type-confusion).
+    if not isinstance(loaded, dict):
+        return defaults
+
     if not policy_config.get("allow_project_suppressions", False):
         loaded = {
             key: value

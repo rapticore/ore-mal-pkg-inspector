@@ -23,14 +23,29 @@ SEVERITY_RANK = {
     "high": 3,
     "critical": 4,
 }
-SEVERITY_ORDER_SQL = (
-    "CASE lower(severity) "
-    "WHEN 'critical' THEN 4 "
-    "WHEN 'high' THEN 3 "
-    "WHEN 'medium' THEN 2 "
-    "WHEN 'low' THEN 1 "
-    "ELSE 0 END"
-)
+
+DEFAULT_POLICY_JSON = "{}"
+
+
+def _validate_project_path(path: str) -> str:
+    """Normalize and validate a project path.
+
+    Raises ValueError if the path contains null bytes or does not point
+    to an existing directory.
+    """
+    if "\x00" in path:
+        raise ValueError("Project path must not contain null bytes")
+    normalized = os.path.abspath(path)
+    if not os.path.isdir(normalized):
+        raise ValueError(f"Project path is not an existing directory: {normalized}")
+    return normalized
+
+
+def _normalize_project_path(path: str) -> str:
+    """Normalize a project path while rejecting obviously invalid values."""
+    if "\x00" in path:
+        raise ValueError("Project path must not contain null bytes")
+    return os.path.abspath(path)
 
 
 def utcnow() -> str:
@@ -230,7 +245,7 @@ class MonitorState:
 
     def add_watched_project(self, project_path: str, policy: Optional[Dict] = None) -> None:
         """Register or update a watched project."""
-        normalized_path = os.path.abspath(project_path)
+        normalized_path = _validate_project_path(project_path)
         now = utcnow()
         with self._connect() as conn:
             conn.execute(
@@ -253,14 +268,14 @@ class MonitorState:
 
     def remove_watched_project(self, project_path: str) -> None:
         """Remove a watched project and its observed-file cache."""
-        normalized_path = os.path.abspath(project_path)
+        normalized_path = _normalize_project_path(project_path)
         with self._connect() as conn:
             conn.execute("DELETE FROM watched_projects WHERE path = ?", (normalized_path,))
             conn.execute("DELETE FROM observed_files WHERE project_path = ?", (normalized_path,))
 
     def import_watched_project(self, record: Dict) -> None:
         """Import one watched-project row, preferring the newest update time."""
-        normalized_path = os.path.abspath(str(record["path"]))
+        normalized_path = _normalize_project_path(str(record["path"]))
         policy_json = record.get("policy_json")
         if policy_json is None:
             policy_json = json.dumps(record.get("policy", {}), sort_keys=True)
@@ -289,7 +304,7 @@ class MonitorState:
                 """,
                 (
                     normalized_path,
-                    str(policy_json or "{}"),
+                    str(policy_json or DEFAULT_POLICY_JSON),
                     int(record.get("enabled", 1)),
                     str(record.get("created_at") or utcnow()),
                     str(record.get("updated_at") or utcnow()),
@@ -313,7 +328,7 @@ class MonitorState:
         projects = []
         for row in rows:
             project = dict(row)
-            project["policy"] = json.loads(project.pop("policy_json") or "{}")
+            project["policy"] = json.loads(project.pop("policy_json") or DEFAULT_POLICY_JSON)
             projects.append(project)
         return projects
 
@@ -328,7 +343,7 @@ class MonitorState:
         if row is None:
             return None
         project = dict(row)
-        project["policy"] = json.loads(project.pop("policy_json") or "{}")
+        project["policy"] = json.loads(project.pop("policy_json") or DEFAULT_POLICY_JSON)
         return project
 
     def update_project_scan(
@@ -513,7 +528,14 @@ class MonitorState:
         if project_path:
             query += " AND project_path = ?"
             params.append(os.path.abspath(project_path))
-        query += f" ORDER BY {SEVERITY_ORDER_SQL} DESC, title ASC"
+        query += (
+            " ORDER BY CASE lower(severity)"
+            " WHEN 'critical' THEN 4"
+            " WHEN 'high' THEN 3"
+            " WHEN 'medium' THEN 2"
+            " WHEN 'low' THEN 1"
+            " ELSE 0 END DESC, title ASC"
+        )
         if limit is not None:
             query += " LIMIT ?"
             params.append(max(int(limit), 1))
@@ -542,10 +564,15 @@ class MonitorState:
                 "SELECT COUNT(*) AS count FROM dependency_checks"
             ).fetchone()["count"]
             highest_active = conn.execute(
-                f"""
+                """
                 SELECT severity FROM findings
                 WHERE active = 1
-                ORDER BY {SEVERITY_ORDER_SQL} DESC, title ASC
+                ORDER BY CASE lower(severity)
+                    WHEN 'critical' THEN 4
+                    WHEN 'high' THEN 3
+                    WHEN 'medium' THEN 2
+                    WHEN 'low' THEN 1
+                    ELSE 0 END DESC, title ASC
                 LIMIT 1
                 """
             ).fetchone()

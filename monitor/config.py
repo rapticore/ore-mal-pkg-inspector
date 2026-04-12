@@ -92,7 +92,7 @@ def allocate_api_port(host: str = "127.0.0.1") -> int:
 
 def _default_api_port_for_instance(instance_name: str) -> int:
     """Return a stable, per-workspace default API port without binding a socket."""
-    digest = hashlib.sha1(instance_name.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(instance_name.encode("utf-8")).hexdigest()
     return API_PORT_BASE + (int(digest[:8], 16) % API_PORT_RANGE)
 
 
@@ -105,13 +105,10 @@ def ensure_owner_only_permissions(path: str, mode: int) -> None:
 
 
 def ensure_not_symlink(path: str, description: str) -> None:
-    """Refuse to use symlinked monitor-managed paths or parent components."""
+    """Refuse to use a symlink for the requested monitor-managed path itself."""
     normalized = os.path.abspath(os.path.expanduser(path))
-    current = os.path.sep if normalized.startswith(os.path.sep) else ""
-    for component in [part for part in normalized.split(os.sep) if part]:
-        current = os.path.join(current, component) if current else component
-        if os.path.lexists(current) and os.path.islink(current):
-            raise RuntimeError(f"Refusing to use symlinked {description}: {current}")
+    if os.path.lexists(normalized) and os.path.islink(normalized):
+        raise RuntimeError(f"Refusing to use symlinked {description}: {normalized}")
 
 
 def get_repo_root(explicit_root: Optional[str] = None) -> str:
@@ -126,7 +123,7 @@ def _safe_instance_name(repo_root: str) -> str:
     normalized_root = os.path.abspath(repo_root)
     basename = os.path.basename(normalized_root.rstrip(os.sep)) or "repo"
     safe_basename = "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in basename)
-    digest = hashlib.sha1(normalized_root.encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(normalized_root.encode("utf-8")).hexdigest()[:12]
     return f"{safe_basename}-{digest}"
 
 
@@ -403,6 +400,9 @@ def ensure_monitor_api_token(repo_root: Optional[str] = None) -> str:
             ensure_owner_only_permissions(token_path, OWNER_ONLY_FILE_MODE)
             return token
 
+    # secrets.token_urlsafe(32) produces 32 random bytes (256 bits of entropy),
+    # base64url-encoded to ~43 characters.  This exceeds the OWASP minimum of
+    # 128 bits for session/API tokens.
     token = secrets.token_urlsafe(32)
     with open(token_path, "w", encoding="utf-8") as handle:
         handle.write(token)

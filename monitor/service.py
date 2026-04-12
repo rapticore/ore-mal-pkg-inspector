@@ -27,6 +27,7 @@ from monitor.api import build_override_expiry
 from monitor.api import make_check_id
 from monitor.api import make_override_id
 from monitor.api import normalize_dependency_input
+from monitor.api import normalize_source_input
 from monitor.api import resolve_exact_version
 from monitor.api import supported_health_payload
 from monitor.api import SUPPORTED_CLIENT_TYPES
@@ -765,11 +766,17 @@ class MonitorService:
         if isinstance(dependencies, list) and dependencies:
             return [normalize_dependency_input(item) for item in dependencies]
 
-        manifest_path = os.path.abspath(str(payload["manifest_path"]))
+        manifest_path = os.path.realpath(str(payload["manifest_path"]))
         if not os.path.exists(manifest_path):
             raise ValueError(f"manifest_path does not exist: {manifest_path}")
         if not os.path.isfile(manifest_path):
             raise ValueError(f"manifest_path is not a file: {manifest_path}")
+
+        project_path = os.path.realpath(str(payload.get("project_path", "")))
+        if project_path and not manifest_path.startswith(project_path + os.sep):
+            raise ValueError(
+                f"manifest_path '{manifest_path}' is not inside project_path '{project_path}'"
+            )
 
         filename = os.path.basename(manifest_path)
         manifest = get_manifest_for_filename(filename)
@@ -826,7 +833,8 @@ class MonitorService:
             if dependency_matches:
                 match = dependency_matches[0]
                 has_malicious = True
-                uninstall_cmd = UNINSTALL_COMMANDS.get(ecosystem, "").format(name=dependency["name"])
+                safe_name = shlex.quote(dependency["name"])
+                uninstall_cmd = UNINSTALL_COMMANDS.get(ecosystem, "").format(name=safe_name)
                 results.append(
                     {
                         "name": dependency["name"],
@@ -956,7 +964,7 @@ class MonitorService:
         ecosystem = str(payload["ecosystem"])
         evaluation = self._evaluate_dependencies(list(payload["dependencies"]), ecosystem)
         check_id = make_check_id()
-        source = dict(payload.get("source", {}))
+        source = normalize_source_input(payload.get("source"))
         self.state.record_dependency_check(
             check_id=check_id,
             client_type=str(payload["client_type"]),
@@ -1066,8 +1074,36 @@ class MonitorService:
             "decision": "allow",
         }
 
+    _ALLOWED_COMMANDS = frozenset({
+        "launchctl",
+        "systemctl",
+        "systemd-run",
+    })
+
+    _SHELL_METACHARACTERS = frozenset(";&|`$(){}[]!#~<>\\'\"\n\r")
+
     def _run_command(self, command: List[str]) -> subprocess.CompletedProcess:
-        """Run a subprocess command and capture output."""
+        """Run a subprocess command and capture output.
+
+        Only commands whose base name is in _ALLOWED_COMMANDS are permitted.
+        All command elements are checked for shell metacharacters.
+        """
+        if not command:
+            raise ValueError("Empty command list")
+
+        base_cmd = os.path.basename(command[0])
+        if base_cmd not in self._ALLOWED_COMMANDS:
+            raise ValueError(
+                f"Command '{base_cmd}' is not in the allowed command set: "
+                f"{sorted(self._ALLOWED_COMMANDS)}"
+            )
+
+        for i, element in enumerate(command):
+            if any(ch in element for ch in self._SHELL_METACHARACTERS):
+                raise ValueError(
+                    f"Command element at index {i} contains disallowed shell metacharacter"
+                )
+
         return subprocess.run(
             command,
             check=False,

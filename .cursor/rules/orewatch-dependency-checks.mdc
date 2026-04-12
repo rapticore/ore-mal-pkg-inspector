@@ -1,0 +1,159 @@
+---
+description: Require OreWatch MCP checks before dependency additions and manifest edits that introduce dependencies.
+alwaysApply: true
+---
+
+# OreWatch Dependency Safety — Cursor Integration
+
+Use the `orewatch` MCP server before introducing dependencies in this
+repository.
+
+## Setup
+
+### Install OreWatch
+
+```bash
+pipx install --python python3.14 orewatch  # recommended
+brew install rapticore/tap/orewatch  # macOS alternative
+python3.14 -m pip install orewatch  # CI / virtualenvs
+```
+
+### Start the Monitor
+
+```bash
+orewatch monitor quickstart /path/to/project --client cursor
+```
+
+### Register the MCP Server
+
+Copy the output from the command above (or regenerate it) into Cursor's MCP
+settings:
+
+```json
+{
+  "mcpServers": {
+    "orewatch": {
+      "command": "/absolute/path/to/orewatch",
+      "args": ["monitor", "mcp"]
+    }
+  }
+}
+```
+
+Regenerate at any time with:
+
+```bash
+orewatch monitor ide-bootstrap --client cursor
+```
+
+## Available MCP Tools
+
+| Tool | Purpose |
+|---|---|
+| `orewatch_health` | Health check — verify the monitor is reachable |
+| `orewatch_check_dependency_add` | **Pre-install gate** — check before adding a dependency |
+| `orewatch_check_manifest` | Audit a manifest file after direct edits |
+| `orewatch_override_dependency_add` | Record an explicit user override for a blocked package |
+| `orewatch_list_active_findings` | Retrieve current open findings |
+| `orewatch_list_notifications` | Retrieve recent alert messages |
+
+## Required Flow
+
+1. **Before** any dependency add, install, or update command, call
+   `orewatch_check_dependency_add`.
+2. Use `client_type: "cursor"`.
+3. Use `project_path` as the affected project root.
+4. When a package-manager command is known, use `source.kind: "agent_command"`
+   and populate `source.command` with the exact intended command.
+5. **Do not** run the package-manager command or edit the manifest until
+   OreWatch returns an `allow` decision.
+6. If OreWatch returns `override_required` or otherwise blocks the dependency,
+   **stop**, report the decision, and wait for an explicit user override before
+   proceeding.
+7. After directly editing a supported manifest to add or change dependencies,
+   call `orewatch_check_manifest` for the saved manifest and report the result.
+8. Before finishing dependency-related work, call
+   `orewatch_list_active_findings` and `orewatch_list_notifications` for the
+   affected project and surface any active alerts.
+
+## Example — Checking a Dependency
+
+```json
+{
+  "client_type": "cursor",
+  "project_path": "/Users/dev/my-app",
+  "ecosystem": "npm",
+  "package_manager": "npm",
+  "operation": "add",
+  "dependencies": [
+    { "name": "lodash", "version": "4.17.21" }
+  ],
+  "source": {
+    "kind": "agent_command",
+    "command": "npm install lodash@4.17.21"
+  }
+}
+```
+
+Allowed response → `"decision": "allow"` → safe to proceed.
+Blocked response → `"decision": "override_required"` → stop and report.
+
+## Dependency Object Fields
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string | Required |
+| `version` | string | Simple exact version shorthand |
+| `requested_spec` | string | Use instead of `version` for ranges/constraints |
+| `resolved_version` | string | Canonical resolved version |
+| `dev_dependency` | boolean | Optional |
+
+Do **not** send `version` together with `requested_spec` / `resolved_version`.
+
+## Applies To
+
+- npm, pnpm, and yarn dependency additions
+- pip, poetry, and pipenv dependency additions
+- go, cargo, bundler, gem, maven, and gradle dependency additions
+- Direct edits to supported manifests such as `package.json`,
+  `requirements.txt`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `pom.xml`, and
+  `Gemfile`
+
+## Supported Ecosystems
+
+| Ecosystem | Package Managers | Key Manifests |
+|---|---|---|
+| npm | npm, yarn, pnpm | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
+| PyPI | pip, poetry, pipenv | `requirements.txt`, `pyproject.toml`, `setup.py`, `Pipfile` |
+| Maven | maven, gradle | `pom.xml`, `build.gradle` |
+| RubyGems | bundler, gem | `Gemfile`, `Gemfile.lock` |
+| Go | go | `go.mod`, `go.sum` |
+| Cargo | cargo | `Cargo.toml`, `Cargo.lock` |
+
+## Decision Policy
+
+OreWatch returns `allow` when:
+- Threat data is `complete`
+- Every dependency resolves to an exact version
+- No dependency matches malicious-package intelligence
+
+OreWatch returns `override_required` when:
+- A dependency matches malicious intelligence
+- Threat data is `partial` or `failed`
+- Exact version resolution fails
+- The monitor API is unavailable
+
+## If OreWatch Is Unavailable
+
+- State that the OreWatch preflight dependency safety check could not be
+  performed.
+- Do not silently bypass OreWatch for dependency changes.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| MCP tools not visible | Re-run `orewatch monitor ide-bootstrap --client cursor` and update MCP config |
+| `orewatch_health` fails | Run `orewatch monitor start` then `orewatch monitor status` |
+| `data_health: partial` | Run `orewatch monitor scan-now` to trigger a refresh |
+| Token errors | Check `orewatch monitor connection-info` for the correct `token_path` |

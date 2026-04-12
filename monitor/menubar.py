@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import importlib.metadata
 import logging
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -43,6 +45,33 @@ DEFAULT_STATUSBAR_ICON_CANDIDATE_PATHS = (
     os.path.join(_ASSETS_DIR, "rapticore-icon-128.png"),
     os.path.join(_ASSETS_DIR, "notification-icon.png"),
 )
+
+
+def _resolve_orewatch_version() -> str:
+    """Return the installed OreWatch version, falling back to local source metadata."""
+    try:
+        return importlib.metadata.version("orewatch")
+    except importlib.metadata.PackageNotFoundError:
+        pyproject_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "pyproject.toml",
+        )
+        try:
+            with open(pyproject_path, "rb") as handle:
+                pyproject = tomllib.load(handle)
+            return str(pyproject.get("project", {}).get("version", "")).strip()
+        except (OSError, tomllib.TOMLDecodeError):
+            return ""
+
+
+OREWATCH_VERSION = _resolve_orewatch_version()
+
+
+def orewatch_version_label() -> str:
+    """Return the menu-bar label for the current OreWatch version."""
+    if OREWATCH_VERSION:
+        return f"OreWatch v{OREWATCH_VERSION}"
+    return "OreWatch"
 
 
 @dataclass
@@ -416,7 +445,7 @@ def build_menu_bar_tooltip(
     """Return a tooltip summarizing current monitor state."""
     status = "running" if snapshot.running else "stopped"
     lines = [
-        f"OreWatch monitor {status}",
+        f"{orewatch_version_label()} monitor {status}",
         f"Watched projects: {snapshot.watch_count}",
         f"Active findings: {snapshot.active_findings}",
     ]
@@ -468,6 +497,15 @@ def _deliver_macos_notification(
     """Use AppleScript Notification Center delivery when available."""
     if not shutil.which("osascript"):
         return False
+    # Sanitize inputs passed to osascript to prevent command injection via
+    # crafted notification strings.  Strip control characters and limit length.
+    def _sanitize(text: str, max_len: int = 256) -> str:
+        cleaned = "".join(ch for ch in text if ch.isprintable())
+        return cleaned[:max_len]
+
+    title = _sanitize(title)
+    subtitle = _sanitize(subtitle)
+    message = _sanitize(message)
     result = subprocess.run(
         [
             "osascript",
@@ -885,6 +923,10 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
         def _open_path(self, path: str) -> None:
             if not path:
                 return
+            # Validate the path before opening to prevent path traversal.
+            path = os.path.abspath(path)
+            if "\x00" in path or os.path.islink(path):
+                return
             workspace = AppKit.NSWorkspace.sharedWorkspace()
             if workspace.openFile_(path):
                 return
@@ -942,7 +984,7 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
             self._set_status_visuals(snapshot)
             self.menu.removeAllItems()
 
-            self.menu.addItem_(self._make_item("OreWatch", enabled=False))
+            self.menu.addItem_(self._make_item(orewatch_version_label(), enabled=False))
             attention_alert_count = self._attention_alert_count(snapshot)
             newest_alert = latest_attention_notification(
                 snapshot.recent_notifications,

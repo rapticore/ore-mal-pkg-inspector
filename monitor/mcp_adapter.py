@@ -373,7 +373,13 @@ class MCPBridge:
                 return self._offline_findings()
             query = {}
             if arguments.get("project_path"):
-                query["project_path"] = str(arguments["project_path"])
+                pp = str(arguments["project_path"])
+                if "\x00" in pp:
+                    raise ValueError("Invalid project_path: null bytes not allowed")
+                pp = os.path.abspath(pp)
+                if not os.path.isdir(pp):
+                    raise ValueError(f"project_path is not a valid directory: {pp}")
+                query["project_path"] = pp
             if arguments.get("limit"):
                 query["limit"] = int(arguments["limit"])
             if arguments.get("min_severity"):
@@ -388,7 +394,13 @@ class MCPBridge:
                 return self._offline_notifications()
             query = {}
             if arguments.get("project_path"):
-                query["project_path"] = str(arguments["project_path"])
+                pp = str(arguments["project_path"])
+                if "\x00" in pp:
+                    raise ValueError("Invalid project_path: null bytes not allowed")
+                pp = os.path.abspath(pp)
+                if not os.path.isdir(pp):
+                    raise ValueError(f"project_path is not a valid directory: {pp}")
+                query["project_path"] = pp
             if arguments.get("limit"):
                 query["limit"] = int(arguments["limit"])
             path = "/v1/notifications"
