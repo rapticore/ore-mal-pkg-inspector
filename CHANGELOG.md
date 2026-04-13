@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.2.2 - 2026-04-12
+
+- Removed the remaining `sys.path` import shims from scanner and collector entrypoints by switching to package-aware imports and explicit local module loading.
+- Fixed monitor state path normalization so watched projects, notifications, and dependency-check records treat `/var/...` and `/private/var/...` aliases consistently on macOS.
+- Expanded regression coverage for collector loading, malicious checker module resolution, normalized project-path storage, and the associated end-to-end release flow.
+- Verified the release with `python3.14 -m unittest tests.test_monitor tests.test_regressions tests.test_packaging tests.test_client_e2e tests.test_e2e_compromised_detection`, `python3.14 -m build`, and the lean end-to-end matrix run in `scripts/run_e2e_matrix.py`.
+
 ## 1.2.1 - 2026-04-11
 
 - Hardened monitor request validation, service path handling, snapshot staging, and collector error reporting against path traversal, weak token handling, unsafe temp/log path usage, and malformed payloads.

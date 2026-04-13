@@ -1383,7 +1383,10 @@ class MonitorTests(unittest.TestCase):
 
             service = MonitorService(workspace_root)
             watched_paths = {project["path"] for project in service.state.list_watched_projects()}
-            self.assertEqual(watched_paths, {project_a, project_b})
+            self.assertEqual(
+                watched_paths,
+                {os.path.realpath(project_a), os.path.realpath(project_b)},
+            )
 
     def test_singleton_monitor_migrates_legacy_watched_projects_once(self):
         with tempfile.TemporaryDirectory() as legacy_workspace_a, tempfile.TemporaryDirectory() as legacy_workspace_b:
@@ -1397,7 +1400,7 @@ class MonitorTests(unittest.TestCase):
             with legacy_state_a._connect() as conn:
                 conn.execute(
                     "UPDATE watched_projects SET updated_at = ? WHERE path = ?",
-                    ("2026-04-01T00:00:00Z", os.path.abspath(legacy_workspace_a)),
+                    ("2026-04-01T00:00:00Z", os.path.realpath(legacy_workspace_a)),
                 )
 
             duplicate_path = os.path.join(legacy_workspace_a, "duplicate-project")
@@ -1409,7 +1412,7 @@ class MonitorTests(unittest.TestCase):
                     (
                         "2026-04-01T00:00:00Z",
                         json.dumps({"severity_threshold": "low"}),
-                        duplicate_path,
+                        os.path.realpath(duplicate_path),
                     ),
                 )
 
@@ -1421,17 +1424,17 @@ class MonitorTests(unittest.TestCase):
                     (
                         "2026-04-02T00:00:00Z",
                         json.dumps({"severity_threshold": "critical"}),
-                        duplicate_path,
+                        os.path.realpath(duplicate_path),
                     ),
                 )
 
             service = MonitorService()
             watched = {project["path"]: project for project in service.state.list_watched_projects()}
 
-            self.assertIn(os.path.abspath(legacy_workspace_a), watched)
-            self.assertIn(os.path.abspath(duplicate_path), watched)
+            self.assertIn(os.path.realpath(legacy_workspace_a), watched)
+            self.assertIn(os.path.realpath(duplicate_path), watched)
             self.assertEqual(
-                watched[os.path.abspath(duplicate_path)]["policy"]["severity_threshold"],
+                watched[os.path.realpath(duplicate_path)]["policy"]["severity_threshold"],
                 "critical",
             )
             self.assertTrue(os.path.exists(legacy_a["state_db"]))
@@ -1462,7 +1465,7 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(len(findings), 2)
         self.assertEqual(
             {finding["project_path"] for finding in findings},
-            {"/tmp/project-a", "/tmp/project-b"},
+            {os.path.realpath("/tmp/project-a"), os.path.realpath("/tmp/project-b")},
         )
 
     def test_monitor_state_reactivates_resolved_finding_without_primary_key_collision(self):

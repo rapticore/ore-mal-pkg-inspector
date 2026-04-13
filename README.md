@@ -276,7 +276,7 @@ virtualenvs:
 python3.14 -m pip install orewatch
 
 # Pin a version for reproducible CI builds
-python3.14 -m pip install orewatch==1.2.1
+python3.14 -m pip install orewatch==1.2.2
 
 # If you want the macOS menu bar app on a fresh install, use this instead:
 # python3.14 -m pip install 'orewatch[mac-menubar]'

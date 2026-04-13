@@ -6,9 +6,10 @@ Checks packages against unified malicious package databases (SQLite)
 
 import os
 import re
-import sys
 import logging
 import hashlib
+import importlib
+import importlib.util
 import sqlite3
 import urllib.error
 import urllib.parse
@@ -17,9 +18,28 @@ import yaml
 from typing import List, Dict, Optional, Set
 from pathlib import Path
 
-# Add collectors directory to path for db module
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'collectors'))
-import db
+
+def _load_collectors_db_module():
+    """Load the repo-owned collectors.db module without mutating sys.path."""
+    collectors_root = os.path.realpath(
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "collectors")
+    )
+    if __package__:
+        module = importlib.import_module("collectors.db")
+    else:  # pragma: no cover - exercised when run as a script
+        db_path = os.path.join(collectors_root, "db.py")
+        spec = importlib.util.spec_from_file_location("orewatch_collectors_db", db_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load collectors.db from {db_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    module_path = os.path.realpath(getattr(module, "__file__", ""))
+    if not module_path or not module_path.startswith(collectors_root + os.sep):
+        raise ImportError(f"Refusing to use collectors.db outside {collectors_root}: {module_path}")
+    return module
+
+
+db = _load_collectors_db_module()
 
 # Module logger
 logger = logging.getLogger(__name__)

@@ -35,7 +35,7 @@ def _validate_project_path(path: str) -> str:
     """
     if "\x00" in path:
         raise ValueError("Project path must not contain null bytes")
-    normalized = os.path.abspath(path)
+    normalized = os.path.realpath(os.path.abspath(path))
     if not os.path.isdir(normalized):
         raise ValueError(f"Project path is not an existing directory: {normalized}")
     return normalized
@@ -45,7 +45,7 @@ def _normalize_project_path(path: str) -> str:
     """Normalize a project path while rejecting obviously invalid values."""
     if "\x00" in path:
         raise ValueError("Project path must not contain null bytes")
-    return os.path.abspath(path)
+    return os.path.realpath(os.path.abspath(path))
 
 
 def utcnow() -> str:
@@ -334,7 +334,7 @@ class MonitorState:
 
     def get_watched_project(self, project_path: str) -> Optional[Dict]:
         """Return one watched project record."""
-        normalized_path = os.path.abspath(project_path)
+        normalized_path = _normalize_project_path(project_path)
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM watched_projects WHERE path = ?",
@@ -356,7 +356,7 @@ class MonitorState:
         event_reason: Optional[str] = None,
     ) -> None:
         """Persist last scan details."""
-        normalized_path = os.path.abspath(project_path)
+        normalized_path = _normalize_project_path(project_path)
         now = utcnow()
         quick_value = now if scan_kind == "quick" else None
         full_value = now if scan_kind == "full" else None
@@ -425,7 +425,7 @@ class MonitorState:
 
     def get_observed_files(self, project_path: str) -> Dict[str, Dict]:
         """Return the stored watcher snapshot for one project."""
-        normalized_path = os.path.abspath(project_path)
+        normalized_path = _normalize_project_path(project_path)
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -446,7 +446,7 @@ class MonitorState:
 
     def replace_observed_files(self, project_path: str, snapshot: Dict[str, Dict]) -> None:
         """Replace the stored watcher snapshot for one project."""
-        normalized_path = os.path.abspath(project_path)
+        normalized_path = _normalize_project_path(project_path)
         with self._connect() as conn:
             conn.execute(
                 "DELETE FROM observed_files WHERE project_path = ?",
@@ -478,7 +478,7 @@ class MonitorState:
         finding_fingerprint: Optional[str] = None,
     ) -> None:
         """Record a notification event."""
-        normalized_path = os.path.abspath(project_path)
+        normalized_path = _normalize_project_path(project_path)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -507,7 +507,7 @@ class MonitorState:
         params: List[object] = []
         if project_path:
             query += " WHERE project_path = ?"
-            params.append(os.path.abspath(project_path))
+            params.append(_normalize_project_path(project_path))
         query += """
             ORDER BY created_at DESC, id DESC
             LIMIT ?
@@ -527,7 +527,7 @@ class MonitorState:
         params: List[object] = []
         if project_path:
             query += " AND project_path = ?"
-            params.append(os.path.abspath(project_path))
+            params.append(_normalize_project_path(project_path))
         query += (
             " ORDER BY CASE lower(severity)"
             " WHEN 'critical' THEN 4"
@@ -614,7 +614,7 @@ class MonitorState:
                 (
                     check_id,
                     client_type,
-                    os.path.abspath(project_path),
+                    _normalize_project_path(project_path),
                     ecosystem,
                     package_manager,
                     operation,
@@ -688,7 +688,7 @@ class MonitorState:
         report_path: Optional[str],
     ) -> Dict[str, List[Dict]]:
         """Upsert active findings and return new/resolved/escalated deltas."""
-        normalized_path = os.path.abspath(project_path)
+        normalized_path = _normalize_project_path(project_path)
         now = utcnow()
         with self._connect() as conn:
             current_rows = conn.execute(

@@ -12,11 +12,12 @@ import logging
 logger = logging.getLogger(__name__)
 from collections import defaultdict
 
-# Add current directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import utils
-import db
+if __package__:
+    from . import db
+    from . import utils
+else:  # pragma: no cover - exercised when run as a script
+    import db
+    import utils
 
 
 def load_all_raw_data(source_names=None, raw_data_dir=None):

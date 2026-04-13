@@ -15,10 +15,10 @@ import shutil
 from urllib.request import urlretrieve
 from urllib.error import URLError
 
-# Add current directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import utils
+if __package__:
+    from . import utils
+else:  # pragma: no cover - exercised when run as a script
+    import utils
 
 
 logger = logging.getLogger(__name__)
