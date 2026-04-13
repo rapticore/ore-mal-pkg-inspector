@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import os
 import shutil
-import sys
 import tempfile
+import importlib
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -34,6 +34,14 @@ logger = get_logger(__name__)
 REFRESH_MODE_EXISTING_ONLY = "existing_only"
 REFRESH_MODE_LIVE_GATED_IF_NEEDED = "live_gated_if_needed"
 REFRESH_MODE_LIVE_GATED_FORCE = "live_gated_force"
+
+
+def _path_is_within(base_path: str, candidate_path: str) -> bool:
+    """Return True when *candidate_path* resolves inside *base_path*."""
+    try:
+        return os.path.commonpath([base_path, candidate_path]) == base_path
+    except ValueError:
+        return False
 
 
 @dataclass
@@ -201,7 +209,14 @@ def aggregate_package_locations(packages: List[Dict], scanned_path: str) -> List
         if "physical_location" in pkg and pkg["physical_location"]:
             phys_loc = pkg["physical_location"]
             abs_path = phys_loc["artifact_location"]["uri"]
-            rel_path = os.path.relpath(abs_path, scanned_path)
+            resolved_path = os.path.realpath(os.path.abspath(abs_path))
+            if not _path_is_within(scanned_path, resolved_path):
+                logger.warning(
+                    "Skipping package location outside scanned path: %s",
+                    abs_path,
+                )
+                continue
+            rel_path = os.path.relpath(resolved_path, scanned_path)
             location = {
                 "physicalLocation": {
                     "artifactLocation": {"uri": rel_path},
@@ -339,36 +354,25 @@ def scan_file(file_path: str, ecosystem: Optional[str] = None, scan_iocs: bool =
 
 def _load_orchestrator_helpers():
     """Import collector orchestrator helpers lazily."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    code_root = os.path.realpath(script_dir)
-    collectors_dir = os.path.realpath(os.path.join(script_dir, "collectors"))
-    if not os.path.isdir(collectors_dir):
-        raise ValueError(f"Collectors directory does not exist: {collectors_dir}")
-    if not collectors_dir.startswith(code_root + os.sep):
-        raise ValueError(
-            f"Collectors directory {collectors_dir} is outside code root {code_root}"
+    collectors_root = os.path.realpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "collectors")
+    )
+    orchestrator = importlib.import_module("collectors.orchestrator")
+    module_path = os.path.realpath(getattr(orchestrator, "__file__", ""))
+    if not module_path or not _path_is_within(collectors_root, module_path):
+        raise ImportError(
+            f"Refusing to use orchestrator outside collectors package: {module_path}"
         )
-    if collectors_dir not in sys.path:
-        sys.path.insert(0, collectors_dir)
-
-    from orchestrator import collect_all_data
-    from orchestrator import EXPECTED_ECOSYSTEMS
-    from orchestrator import SOURCE_DEFINITIONS
-    from orchestrator import build_databases
-    from orchestrator import databases_need_refresh
-    from orchestrator import get_database_statuses
-    from orchestrator import run_all_collectors
-    from orchestrator import resolve_sources
 
     return (
-        collect_all_data,
-        build_databases,
-        databases_need_refresh,
-        get_database_statuses,
-        resolve_sources,
-        run_all_collectors,
-        EXPECTED_ECOSYSTEMS,
-        SOURCE_DEFINITIONS,
+        orchestrator.collect_all_data,
+        orchestrator.build_databases,
+        orchestrator.databases_need_refresh,
+        orchestrator.get_database_statuses,
+        orchestrator.resolve_sources,
+        orchestrator.run_all_collectors,
+        orchestrator.EXPECTED_ECOSYSTEMS,
+        orchestrator.SOURCE_DEFINITIONS,
     )
 
 

@@ -13,6 +13,7 @@ import malicious_package_scanner as scanner
 import scanner_engine as engine
 from collectors import collect_openssf, collect_osv, collect_socketdev, db as collector_db, utils
 from collectors.live_update import evaluate_candidate
+from monitor.state import MonitorState
 from scanner_engine import ScanResult
 from scanner_engine import REFRESH_MODE_EXISTING_ONLY
 from scanner_engine import REFRESH_MODE_LIVE_GATED_FORCE
@@ -26,9 +27,7 @@ COLLECTORS_DIR = os.path.join(REPO_ROOT, "collectors")
 
 
 def _import_orchestrator():
-    if COLLECTORS_DIR not in sys.path:
-        sys.path.insert(0, COLLECTORS_DIR)
-    return importlib.import_module("orchestrator")
+    return importlib.import_module("collectors.orchestrator")
 
 
 class ScannerRegressionTests(unittest.TestCase):
@@ -93,6 +92,62 @@ class ScannerRegressionTests(unittest.TestCase):
 
         self.assertEqual(len(aggregated), 2)
         self.assertEqual({pkg["ecosystem"] for pkg in aggregated}, {"npm", "pypi"})
+
+    def test_aggregate_package_locations_skips_out_of_tree_locations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scanned_dir = os.path.join(temp_dir, "scanned")
+            outside_dir = os.path.join(temp_dir, "outside")
+            os.makedirs(scanned_dir, exist_ok=True)
+            os.makedirs(outside_dir, exist_ok=True)
+
+            inside_path = os.path.join(scanned_dir, "package.json")
+            outside_path = os.path.join(outside_dir, "package.json")
+            with open(inside_path, "w", encoding="utf-8") as handle:
+                handle.write("{}\n")
+            with open(outside_path, "w", encoding="utf-8") as handle:
+                handle.write("{}\n")
+
+            packages = [
+                {
+                    "name": "inside-pkg",
+                    "version": "1.0.0",
+                    "ecosystem": "npm",
+                    "physical_location": {
+                        "artifact_location": {"uri": inside_path},
+                        "region": {
+                            "start_line": 1,
+                            "start_column": 1,
+                            "end_line": 1,
+                            "end_column": 10,
+                        },
+                    },
+                },
+                {
+                    "name": "outside-pkg",
+                    "version": "1.0.0",
+                    "ecosystem": "npm",
+                    "physical_location": {
+                        "artifact_location": {"uri": outside_path},
+                        "region": {
+                            "start_line": 1,
+                            "start_column": 1,
+                            "end_line": 1,
+                            "end_column": 10,
+                        },
+                    },
+                },
+            ]
+
+            with self.assertLogs("scanner_engine", level="WARNING") as captured:
+                aggregated = scanner.aggregate_package_locations(packages, scanned_dir)
+
+        by_name = {pkg["name"]: pkg for pkg in aggregated}
+        self.assertEqual(
+            by_name["inside-pkg"]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"],
+            "package.json",
+        )
+        self.assertEqual(by_name["outside-pkg"]["locations"], [])
+        self.assertIn("Skipping package location outside scanned path", "\n".join(captured.output))
 
     def test_scan_directory_returns_four_tuple_when_ecosystem_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -322,6 +377,39 @@ class ScannerRegressionTests(unittest.TestCase):
             ["openssf", "osv", "phylum"],
         )
 
+    def test_orchestrator_import_does_not_require_repo_root_on_sys_path(self):
+        original_sys_path = list(sys.path)
+        original_cwd = os.getcwd()
+        original_module = sys.modules.pop("orchestrator", None)
+        importlib.invalidate_caches()
+
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                os.chdir(temp_dir)
+                trimmed_sys_path = []
+                for entry in original_sys_path:
+                    resolved_entry = os.path.realpath(entry or original_cwd)
+                    if resolved_entry in {REPO_ROOT, COLLECTORS_DIR}:
+                        continue
+                    trimmed_sys_path.append(entry)
+                sys.path = [COLLECTORS_DIR] + trimmed_sys_path
+                orchestrator = importlib.import_module("orchestrator")
+                self.assertTrue(callable(orchestrator.setup_logging))
+        finally:
+            os.chdir(original_cwd)
+            sys.path = original_sys_path
+            sys.modules.pop("orchestrator", None)
+            if original_module is not None:
+                sys.modules["orchestrator"] = original_module
+
+    def test_load_orchestrator_helpers_uses_collectors_package_without_sys_path_mutation(self):
+        original_sys_path = list(sys.path)
+
+        helpers = engine._load_orchestrator_helpers()
+
+        self.assertEqual(sys.path, original_sys_path)
+        self.assertEqual(helpers[0].__module__, "collectors.orchestrator")
+
     def test_build_databases_only_loads_successful_sources(self):
         orchestrator = _import_orchestrator()
 
@@ -330,7 +418,7 @@ class ScannerRegressionTests(unittest.TestCase):
             "load_all_raw_data",
             return_value=[],
         ) as load_all_raw_data:
-            with self.assertLogs("orchestrator", level="INFO"):
+            with self.assertLogs("collectors.orchestrator", level="INFO"):
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     summary = orchestrator.build_databases(
                         selected_sources=["openssf", "osv"],
@@ -700,6 +788,31 @@ class ScannerRegressionTests(unittest.TestCase):
 
         self.assertEqual(result, collect_openssf.CACHE_DIR)
         mocked_run.assert_called_once()
+
+    def test_malicious_checker_uses_repo_collectors_db_module(self):
+        import scanners.malicious_checker as checker_module
+
+        expected_path = os.path.realpath(os.path.join(COLLECTORS_DIR, "db.py"))
+        actual_path = os.path.realpath(checker_module.db.__file__)
+
+        self.assertEqual(actual_path, expected_path)
+
+    def test_notifications_normalize_project_path_aliases(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_dir = os.path.join(temp_dir, "project")
+            alias_root = os.path.join(temp_dir, "alias-root")
+            alias_project = os.path.join(alias_root, "project")
+            db_path = os.path.join(temp_dir, "state.db")
+            os.makedirs(project_dir, exist_ok=True)
+            os.symlink(temp_dir, alias_root)
+
+            state = MonitorState(db_path)
+            state.add_notification(alias_project, "dependency_blocked", "blocked message")
+
+            notifications = state.list_recent_notifications(project_path=project_dir)
+
+        self.assertEqual(len(notifications), 1)
+        self.assertEqual(notifications[0]["project_path"], os.path.realpath(project_dir))
 
     def test_cargo_lock_dependencies_are_parsed(self):
         with tempfile.TemporaryDirectory() as temp_dir:

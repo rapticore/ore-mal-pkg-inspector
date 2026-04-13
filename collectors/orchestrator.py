@@ -7,26 +7,48 @@ Programmatically runs all collectors and builds unified databases
 import os
 import sys
 import logging
+import importlib.util
 from typing import List, Optional, Dict, Any
 
-# Add current directory to path for imports
-_collectors_dir = os.path.dirname(os.path.abspath(__file__))
-if _collectors_dir not in sys.path:
-    sys.path.insert(0, _collectors_dir)
 
-# Import logging config from parent directory
-parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
-from logging_config import setup_logging
+def _load_setup_logging():
+    """Load setup_logging from the repo root without mutating sys.path."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    logging_config_path = os.path.join(repo_root, "logging_config.py")
+    spec = importlib.util.spec_from_file_location(
+        "orewatch_logging_config",
+        logging_config_path,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load logging_config from {logging_config_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    setup = getattr(module, "setup_logging", None)
+    if not callable(setup):
+        raise ImportError(
+            f"logging_config at {logging_config_path} does not expose setup_logging"
+        )
+    return setup
 
-import utils
-import collect_openssf
-import collect_osv
-import collect_phylum
-import collect_socketdev
-import build_unified_index
-import db
+
+setup_logging = _load_setup_logging()
+
+if __package__:
+    from . import build_unified_index
+    from . import collect_openssf
+    from . import collect_osv
+    from . import collect_phylum
+    from . import collect_socketdev
+    from . import db
+    from . import utils
+else:  # pragma: no cover - exercised when run as a script
+    import build_unified_index
+    import collect_openssf
+    import collect_osv
+    import collect_phylum
+    import collect_socketdev
+    import db
+    import utils
 
 # Module logger
 logger = logging.getLogger(__name__)
