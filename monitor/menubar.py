@@ -26,6 +26,7 @@ from monitor.config import get_monitor_paths
 
 
 MAC_MENUBAR_OPTIONAL_DEPENDENCY = "pyobjc-framework-Cocoa"
+MAC_MENUBAR_EXTRA = "orewatch[mac-menubar]"
 MENUBAR_APPLE_NOTIFICATION_SCRIPT = (
     "on run argv\n"
     "set notificationTitle to item 1 of argv\n"
@@ -72,6 +73,18 @@ def orewatch_version_label() -> str:
     if OREWATCH_VERSION:
         return f"OreWatch v{OREWATCH_VERSION}"
     return "OreWatch"
+
+
+def _pyobjc_install_error_message() -> str:
+    return (
+        "OreWatch menu bar mode requires PyObjC. Install it into the same Python "
+        "environment as the `orewatch` command: "
+        f"`python3.14 -m pip install '{MAC_MENUBAR_EXTRA}'` or "
+        f"`pipx inject orewatch {MAC_MENUBAR_OPTIONAL_DEPENDENCY}`. "
+        "If `orewatch` was installed with Homebrew, reinstall it with pipx or pip "
+        "using the `mac-menubar` extra; a separate `pip install` will not update "
+        "Homebrew's isolated libexec environment."
+    )
 
 
 @dataclass
@@ -570,10 +583,7 @@ def _load_pyobjc() -> tuple[Any, Any, Any]:
         import Foundation  # type: ignore
         import objc  # type: ignore
     except ImportError as exc:  # pragma: no cover - depends on local runtime
-        raise RuntimeError(
-            "OreWatch menu bar mode requires PyObjC. "
-            f"Install the optional dependency with: pip install '{MAC_MENUBAR_OPTIONAL_DEPENDENCY}'"
-        ) from exc
+        raise RuntimeError(_pyobjc_install_error_message()) from exc
     return AppKit, Foundation, objc
 
 

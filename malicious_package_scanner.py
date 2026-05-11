@@ -149,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if argv and argv[0] == "monitor":
         return run_monitor_cli(argv[1:])
+    if argv and argv[0] == "menubar":
+        return run_monitor_cli(argv)
 
     parser = build_parser()
     args = parser.parse_args(argv)

@@ -25,6 +25,7 @@ from monitor.config import save_monitor_config
 from monitor import mcp_adapter as monitor_mcp_adapter
 from monitor.ide_bootstrap import build_ide_bootstrap
 from monitor.ide_bootstrap import build_mcp_server_definition
+from monitor.menubar import _pyobjc_install_error_message
 from monitor.menubar import build_detached_menubar_command
 from monitor.menubar import _deliver_macos_notification
 from monitor.menubar import _pid_is_running
@@ -1175,6 +1176,14 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("--refresh-seconds", command)
         self.assertIn("12.5", command)
         self.assertEqual(command[-2:], ["--workspace-root", "/tmp/demo-project"])
+
+    def test_pyobjc_install_error_message_mentions_brew_safe_guidance(self):
+        message = _pyobjc_install_error_message()
+
+        self.assertIn("python3.14 -m pip install 'orewatch[mac-menubar]'", message)
+        self.assertIn("pipx inject orewatch pyobjc-framework-Cocoa", message)
+        self.assertIn("Homebrew", message)
+        self.assertIn("isolated libexec environment", message)
 
     def test_launch_menubar_app_detached_reuses_existing_process(self):
         with tempfile.TemporaryDirectory() as repo_root:
