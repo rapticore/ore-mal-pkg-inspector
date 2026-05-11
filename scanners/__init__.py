@@ -2,7 +2,7 @@
 Multi-Ecosystem Malicious Package Scanner Modules
 """
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 # Export main modules
 from scanners import ecosystem_detector

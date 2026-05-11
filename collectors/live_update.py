@@ -6,11 +6,14 @@ Anomaly-gated live update helpers for client endpoints.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import shutil
 import tempfile
-from typing import Any, Dict, Optional, Tuple
+import time
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from . import db
@@ -33,6 +36,8 @@ DEFAULT_LIVE_UPDATE_CONFIG: Dict[str, Any] = {
     "warn_addition_absolute": 1000,
     "retain_accepted_history": 20,
     "retain_rejected_history": 5,
+    "retain_backups": 30,
+    "staging_max_age_seconds": 3600,
 }
 
 
@@ -513,6 +518,98 @@ def _prune_history(history_dir: str, keep: int) -> None:
         os.unlink(entry)
 
 
+def prune_backup_dirs(backups_root: str, keep: int) -> int:
+    """Keep only the most recent `keep` backup subdirectories.
+
+    Backup directory names start with a UTC timestamp, so lexicographic
+    sort matches chronological order. Non-directory and dot-prefixed
+    entries are ignored. Returns the number of directories removed.
+    """
+    if keep < 0 or not os.path.isdir(backups_root):
+        return 0
+    entries = sorted(
+        entry for entry in os.listdir(backups_root)
+        if not entry.startswith(".")
+        and os.path.isdir(os.path.join(backups_root, entry))
+    )
+    victims = entries[:-keep] if keep > 0 else entries
+    for entry in victims:
+        shutil.rmtree(os.path.join(backups_root, entry), ignore_errors=True)
+    return len(victims)
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_backup_manifest(source_dir: str, destination_dir: str, version: str) -> str:
+    """Record a forensic manifest of source_dir's contents at destination_dir.
+
+    Replaces full DB copies (~300 MB) with a sha256+size listing (~1 KB)
+    while preserving everything the audit trail needs: which DBs were in
+    place, their identities, and when the previous live dataset rolled
+    over.
+    """
+    os.makedirs(destination_dir, exist_ok=True)
+    files: List[Dict[str, Any]] = []
+    for entry in sorted(os.listdir(source_dir)):
+        entry_path = os.path.join(source_dir, entry)
+        if not os.path.isfile(entry_path):
+            continue
+        files.append(
+            {
+                "filename": entry,
+                "size": os.path.getsize(entry_path),
+                "sha256": _sha256_file(entry_path),
+            }
+        )
+    manifest = {
+        "version": version,
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "files": files,
+    }
+    manifest_path = os.path.join(destination_dir, "manifest.json")
+    _write_json(manifest_path, manifest)
+    return manifest_path
+
+
+def cleanup_stale_staging(staging_root: str, max_age_seconds: int) -> int:
+    """Remove abandoned staging candidate-* directories older than max_age_seconds.
+
+    Promotion routinely tears down its own `live-update-swap-*` and
+    `snapshot-stage-*` tempdirs via `finally`. The earlier-pipeline
+    `candidate-raw-*` and `candidate-final-*` trees can leak if the
+    process is killed mid-run. Returns the count of entries removed.
+    """
+    if max_age_seconds < 0 or not os.path.isdir(staging_root):
+        return 0
+    cutoff = time.time() - max_age_seconds
+    removed = 0
+    for entry in os.listdir(staging_root):
+        if not entry.startswith("candidate-"):
+            continue
+        entry_path = os.path.join(staging_root, entry)
+        try:
+            mtime = os.path.getmtime(entry_path)
+        except OSError:
+            continue
+        if mtime >= cutoff:
+            continue
+        if os.path.isdir(entry_path):
+            shutil.rmtree(entry_path, ignore_errors=True)
+        else:
+            try:
+                os.unlink(entry_path)
+            except OSError:
+                continue
+        removed += 1
+    return removed
+
+
 def persist_promotion_report(
     promotion_root: str,
     report: Dict[str, Any],
@@ -539,6 +636,7 @@ def promote_candidate_directory(
     candidate_final_data_dir: str,
     promotion_root: str,
     live_dataset_version: str,
+    live_update_config: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """Promote one staged candidate DB directory into the active final-data path."""
     # Validate paths to prevent traversal attacks.
@@ -549,10 +647,12 @@ def promote_candidate_directory(
     active_final_data_dir = os.path.abspath(active_final_data_dir)
     promotion_root = os.path.abspath(promotion_root)
     layout = ensure_live_update_layout(promotion_root)
+    config = merge_live_update_config(live_update_config)
+    cleanup_stale_staging(layout["staging"], int(config.get("staging_max_age_seconds", 3600)))
     os.makedirs(os.path.dirname(active_final_data_dir), exist_ok=True)
     temp_swap_root = tempfile.mkdtemp(prefix="live-update-swap-", dir=layout["staging"])
     temporary_backup_dir = os.path.join(temp_swap_root, "previous-final-data")
-    backup_dir = os.path.join(layout["backups"], live_dataset_version, "final-data")
+    backup_manifest_dir = os.path.join(layout["backups"], live_dataset_version)
     had_existing = os.path.exists(active_final_data_dir)
 
     try:
@@ -567,11 +667,13 @@ def promote_candidate_directory(
             raise
 
         if had_existing and os.path.exists(temporary_backup_dir):
-            os.makedirs(os.path.dirname(backup_dir), exist_ok=True)
-            if os.path.exists(backup_dir):
-                shutil.rmtree(backup_dir)
-            shutil.copytree(temporary_backup_dir, backup_dir)
-            return backup_dir
+            if os.path.exists(backup_manifest_dir):
+                shutil.rmtree(backup_manifest_dir)
+            manifest_path = write_backup_manifest(
+                temporary_backup_dir, backup_manifest_dir, live_dataset_version
+            )
+            prune_backup_dirs(layout["backups"], int(config.get("retain_backups", 30)))
+            return manifest_path
         return None
     finally:
         shutil.rmtree(temp_swap_root, ignore_errors=True)

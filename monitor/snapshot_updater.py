@@ -17,6 +17,11 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
+from collectors.live_update import (
+    merge_live_update_config,
+    prune_backup_dirs,
+    write_backup_manifest,
+)
 from monitor.config import ensure_monitor_layout
 from scanner_engine import ensure_threat_data
 
@@ -655,7 +660,12 @@ class SnapshotUpdater:
             if had_existing and os.path.exists(temporary_backup_dir):
                 if os.path.exists(backup_archive_dir):
                     shutil.rmtree(backup_archive_dir)
-                shutil.copytree(temporary_backup_dir, backup_archive_dir)
+                write_backup_manifest(temporary_backup_dir, backup_archive_dir, version)
+                live_update_config = merge_live_update_config(self.config.get("live_updates", {}))
+                prune_backup_dirs(
+                    os.path.join(self.paths["snapshots"], "backups"),
+                    int(live_update_config.get("retain_backups", 30)),
+                )
 
             self._refresh_current_snapshot_metadata(manifest, channel_document=channel_document)
         finally:
