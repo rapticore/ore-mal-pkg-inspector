@@ -71,6 +71,17 @@ class PackagingMetadataTests(unittest.TestCase):
         self.assertIn("--client", output)
         self.assertIn("--service-manager", output)
 
+    def test_packaged_entrypoint_supports_top_level_menubar_alias(self):
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit) as context:
+            with contextlib.redirect_stdout(stdout):
+                malicious_package_scanner.main(["menubar", "--help"])
+
+        self.assertEqual(context.exception.code, 0)
+        output = stdout.getvalue()
+        self.assertIn("monitor menubar", output)
+        self.assertIn("--foreground", output)
+
 
 if __name__ == "__main__":
     unittest.main()
