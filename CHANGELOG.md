@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.2.3 - 2026-05-11
+
+- Fixed unbounded growth of `snapshots/live-updates/backups/` and `snapshots/backups/`: each live-update or snapshot-apply promotion previously copied the full prior threat-data tree (~300 MB) with no retention, accumulating tens of gigabytes on long-running monitors.
+- Replaced full database copies with SHA-256 backup manifests (~1 KB each); the rollback path in the swap root is unchanged, so durability is preserved.
+- Added retention controls under `live_updates`: `retain_backups` (default 30) and `staging_max_age_seconds` (default 3600), with on-demand application via `orewatch monitor cleanup [--keep-backups N] [--staging-max-age-seconds N]`.
+- Orphaned `candidate-raw-*` and `candidate-final-*` staging directories left behind by interrupted promotions are now reaped automatically on the next promotion and on demand via `monitor cleanup`.
+- Renamed the live-update report field `backup_dir` to `backup_manifest_path` to reflect that the artifact is now a manifest file, not a database tree.
+- Verified the release with `python3.14 -m pytest tests/`, `python3.14 -m build`, and `python3.14 -m twine check`.
+
 ## 1.2.2 - 2026-04-12
 
 - Removed the remaining `sys.path` import shims from scanner and collector entrypoints by switching to package-aware imports and explicit local module loading.

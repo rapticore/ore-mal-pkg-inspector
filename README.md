@@ -276,7 +276,7 @@ virtualenvs:
 python3.14 -m pip install orewatch
 
 # Pin a version for reproducible CI builds
-python3.14 -m pip install orewatch==1.2.2
+python3.14 -m pip install orewatch==1.2.3
 
 # If you want the macOS menu bar app on a fresh install, use this instead:
 # python3.14 -m pip install 'orewatch[mac-menubar]'
@@ -848,6 +848,10 @@ orewatch monitor scan-now /path/to/project
 # Review detections and alerts
 orewatch monitor findings
 orewatch monitor notifications
+
+# Reclaim disk space — prune accumulated backup manifests and orphaned staging
+orewatch monitor cleanup
+orewatch monitor cleanup --keep-backups 5 --staging-max-age-seconds 3600
 ```
 
 **Manual snapshot and signing actions:**
@@ -1449,6 +1453,32 @@ sudo chown -R $USER:$USER /path/to/ore-mal-pkg-inspector
 cd ~/
 git clone https://github.com/rapticore/ore-mal-pkg-inspector.git
 cd ore-mal-pkg-inspector
+```
+
+#### OreWatch Is Using Too Much Disk
+
+**Symptom:** `~/Library/Application Support/OreWatch` (macOS) or
+`$XDG_STATE_HOME/orewatch` (Linux) has grown into the tens of gigabytes.
+
+**Cause (pre-1.2.3):** Every live-update promotion archived a full copy of
+the previous threat-data databases (~300 MB) without retention. A long-running
+monitor accumulated one snapshot per cycle indefinitely.
+
+**Fix:** Upgrade to **1.2.3 or later**. Backups are now ~1 KB
+SHA-256 manifests, retention defaults to the most recent 30, and an explicit
+cleanup command is available:
+
+```bash
+# Apply the configured retention policy now (default: keep 30 manifests,
+# remove staging entries older than 1 hour).
+orewatch monitor cleanup
+
+# Reclaim everything except the most recent 5 backups and purge staging.
+orewatch monitor cleanup --keep-backups 5 --staging-max-age-seconds 0
+
+# Tune retention in monitor config (live_updates section):
+#   retain_backups: <int>             # how many backup manifests to keep
+#   staging_max_age_seconds: <int>    # stale candidate-* staging cutoff
 ```
 
 #### False Positives

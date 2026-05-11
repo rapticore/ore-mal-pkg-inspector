@@ -20,6 +20,11 @@ from contextlib import closing
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from collectors.live_update import (
+    cleanup_stale_staging,
+    merge_live_update_config,
+    prune_backup_dirs,
+)
 from collectors.orchestrator import get_database_statuses
 from logging_config import setup_logging
 from monitor.api import LocalMonitorAPIServer
@@ -78,6 +83,21 @@ UNINSTALL_COMMANDS = {
     "go": "go mod edit -droprequire {name} && go mod tidy",
     "cargo": "cargo remove {name}",
 }
+
+
+def _directory_size_bytes(path: str) -> int:
+    """Return the total on-disk size under path, or 0 when path is missing."""
+    if not os.path.isdir(path):
+        return 0
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            entry = os.path.join(root, name)
+            try:
+                total += os.path.getsize(entry)
+            except OSError:
+                continue
+    return total
 
 
 def _utcnow() -> str:
@@ -700,6 +720,58 @@ class MonitorService:
             "acknowledged_notification_id": target_notification_id,
             "cleared_alert_count": cleared_alert_count,
             "message": f"Marked {cleared_alert_count} alert(s) reviewed",
+        }
+
+    def cleanup_storage(
+        self,
+        keep_backups: Optional[int] = None,
+        staging_max_age_seconds: Optional[int] = None,
+    ) -> Dict[str, object]:
+        """Prune accumulated backup manifests and orphaned staging directories.
+
+        Applies the configured `live_updates.retain_backups` and
+        `live_updates.staging_max_age_seconds` policies on demand. CLI
+        callers may override either value for one-off cleanup.
+        """
+        live_update_config = merge_live_update_config(self.config.get("live_updates", {}))
+        effective_keep = (
+            int(keep_backups)
+            if keep_backups is not None
+            else int(live_update_config.get("retain_backups", 30))
+        )
+        effective_staging_age = (
+            int(staging_max_age_seconds)
+            if staging_max_age_seconds is not None
+            else int(live_update_config.get("staging_max_age_seconds", 3600))
+        )
+
+        snapshots_root = self.paths["snapshots"]
+        targets = {
+            "live_update_backups": os.path.join(snapshots_root, "live-updates", "backups"),
+            "snapshot_apply_backups": os.path.join(snapshots_root, "backups"),
+        }
+        bytes_freed = 0
+        pruned_counts: Dict[str, int] = {}
+        for label, path in targets.items():
+            before = _directory_size_bytes(path)
+            removed = prune_backup_dirs(path, effective_keep)
+            after = _directory_size_bytes(path)
+            pruned_counts[label] = removed
+            bytes_freed += max(before - after, 0)
+
+        staging_root = os.path.join(snapshots_root, "live-updates", "staging")
+        staging_before = _directory_size_bytes(staging_root)
+        staging_removed = cleanup_stale_staging(staging_root, effective_staging_age)
+        staging_after = _directory_size_bytes(staging_root)
+        bytes_freed += max(staging_before - staging_after, 0)
+
+        return {
+            "success": True,
+            "keep_backups": effective_keep,
+            "staging_max_age_seconds": effective_staging_age,
+            "backups_pruned": pruned_counts,
+            "staging_entries_removed": staging_removed,
+            "bytes_freed": bytes_freed,
         }
 
     def _dependency_data_health(self, ecosystem: str) -> Dict[str, object]:

@@ -475,6 +475,24 @@ def build_monitor_parser() -> argparse.ArgumentParser:
         help="Run a package-only quick scan instead of a full scan",
     )
 
+    cleanup_parser = subparsers.add_parser(
+        "cleanup",
+        help="Prune accumulated snapshot backups and orphaned staging directories",
+    )
+    _add_workspace_root_args(cleanup_parser)
+    cleanup_parser.add_argument(
+        "--keep-backups",
+        type=int,
+        default=None,
+        help="Number of most-recent backup manifests to retain (overrides live_updates.retain_backups)",
+    )
+    cleanup_parser.add_argument(
+        "--staging-max-age-seconds",
+        type=int,
+        default=None,
+        help="Remove staging candidate-* entries older than this (overrides live_updates.staging_max_age_seconds)",
+    )
+
     snapshot_parser = subparsers.add_parser("snapshot", help="Manage threat-data snapshots")
     _add_workspace_root_args(snapshot_parser)
     snapshot_subparsers = snapshot_parser.add_subparsers(dest="snapshot_command", required=True)
@@ -706,6 +724,14 @@ def run_monitor_cli(argv: List[str]) -> int:
         if not results:
             return 1 if args.path else 0
         return max(result["exit_code"] for result in results)
+
+    if args.command == "cleanup":
+        result = service.cleanup_storage(
+            keep_backups=args.keep_backups,
+            staging_max_age_seconds=args.staging_max_age_seconds,
+        )
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("success") else 1
 
     if args.command == "snapshot":
         if args.snapshot_command == "keygen":

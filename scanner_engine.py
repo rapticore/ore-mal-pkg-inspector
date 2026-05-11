@@ -480,11 +480,12 @@ def _perform_gated_live_refresh(
         active_database_statuses = get_database_statuses(final_data_dir=active_final_data_dir)
         if report["decision"] in {"promoted", "bootstrapped"}:
             try:
-                backup_dir = promote_candidate_directory(
+                backup_manifest_path = promote_candidate_directory(
                     active_final_data_dir,
                     candidate_final_dir,
                     promotion_root,
                     live_dataset_version,
+                    live_update_config=live_updates_config,
                 )
             except Exception as exc:
                 report["decision"] = "rejected"
@@ -517,8 +518,8 @@ def _perform_gated_live_refresh(
                     "live_dataset_version": current_summary.get("live_dataset_version", "") if current_summary else "",
                     "message": report["message"],
                 }
-            if backup_dir:
-                report["backup_dir"] = backup_dir
+            if backup_manifest_path:
+                report["backup_manifest_path"] = backup_manifest_path
             report_path = persist_promotion_report(promotion_root, report, live_updates_config)
             report["candidate_summary_path"] = report_path
             report["active_summary_path"] = layout["current_summary"]
