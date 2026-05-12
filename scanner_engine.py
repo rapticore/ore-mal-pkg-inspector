@@ -60,6 +60,7 @@ class ScanRequest:
     ensure_data: bool = True
     refresh_mode: str = REFRESH_MODE_LIVE_GATED_IF_NEEDED
     print_summary: bool = True
+    local_threat_packages: List[Dict] = field(default_factory=list)
 
 
 @dataclass
@@ -184,6 +185,131 @@ def _augment_data_metadata(
     )
     enriched["anomalies"] = threat_data_summary.get("anomalies", [])
     return enriched
+
+
+def _match_local_threat_packages(
+    packages: List[Dict],
+    local_threat_packages: List[Dict],
+    ecosystem: str,
+) -> List[Dict]:
+    """Return local user-managed package matches for one ecosystem."""
+    active_entries: Dict[str, List[Dict]] = {}
+    for entry in local_threat_packages:
+        if int(entry.get("active", 1) or 0) != 1:
+            continue
+        if str(entry.get("ecosystem", "")).lower().strip() != str(ecosystem).lower().strip():
+            continue
+        key = str(entry.get("name_normalized") or entry.get("name", "")).lower().strip()
+        active_entries.setdefault(key, []).append(entry)
+    if not active_entries:
+        return []
+
+    matches: List[Dict] = []
+    seen: set[tuple[str, str]] = set()
+    for pkg in packages:
+        package_name = str(pkg.get("name", "") or "").strip()
+        if not package_name:
+            continue
+        package_version = str(pkg.get("version", "") or "")
+        matching_entry = None
+        for entry in active_entries.get(package_name.lower(), []):
+            if _local_threat_entry_matches_version(entry, package_version):
+                matching_entry = entry
+                break
+        if matching_entry is None:
+            continue
+        key = (package_name.lower(), package_version)
+        if key in seen:
+            continue
+        seen.add(key)
+        result = {
+            "name": package_name,
+            "version": package_version,
+            "matched_version": package_version or "all",
+            "ecosystem": ecosystem,
+            "severity": "critical",
+            "sources": ["local"],
+            "description": (
+                "Locally added malicious package"
+                + (f": {matching_entry.get('reason')}" if matching_entry.get("reason") else "")
+            ),
+            "full_details": str(matching_entry.get("reason", "")),
+            "detected_behaviors": ["local_threat_intelligence"],
+            "first_seen": str(matching_entry.get("created_at", "")),
+            "modified": "",
+            "last_updated": str(matching_entry.get("created_at", "")),
+            "source_details": {
+                "local": {
+                    "description": str(matching_entry.get("reason", "Added locally by user")),
+                    "severity": "critical",
+                }
+            },
+            "aliases": [],
+            "cwes": [],
+            "references": [],
+            "origins": [],
+            "affected_versions": _local_threat_versions(matching_entry),
+            "source_url": str(matching_entry.get("source_url", "") or ""),
+            "local_threat_package_id": matching_entry.get("id"),
+        }
+        if "locations" in pkg:
+            result["locations"] = pkg["locations"]
+        matches.append(result)
+    return matches
+
+
+def _normalize_local_threat_version(value: object) -> str:
+    version = str(value or "").strip()
+    while version and version[0] in "^~>=<! ":
+        version = version[1:].strip()
+    if version.startswith("v") and len(version) > 1 and version[1].isdigit():
+        version = version[1:]
+    return version
+
+
+def _local_threat_versions(entry: Dict) -> List[str]:
+    versions = entry.get("versions", [])
+    if isinstance(versions, list):
+        return [str(version).strip() for version in versions if str(version).strip()]
+    return []
+
+
+def _local_threat_entry_matches_version(entry: Dict, package_version: object) -> bool:
+    affected_versions = _local_threat_versions(entry)
+    if not affected_versions:
+        return True
+    normalized_package = _normalize_local_threat_version(package_version)
+    if not normalized_package:
+        return True
+    return normalized_package in {
+        _normalize_local_threat_version(version)
+        for version in affected_versions
+    }
+
+
+def _append_local_matches(
+    malicious_packages: List[Dict],
+    local_matches: List[Dict],
+) -> None:
+    """Append local matches that are not already present from official sources."""
+    existing_keys = {
+        (
+            str(match.get("ecosystem", "")).lower().strip(),
+            str(match.get("name", "")).lower().strip(),
+            str(match.get("version") or match.get("matched_version") or "").strip(),
+        )
+        for match in malicious_packages
+    }
+    for match in local_matches:
+        key = (
+            str(match.get("ecosystem", "")).lower().strip(),
+            str(match.get("name", "")).lower().strip(),
+            str(match.get("version") or match.get("matched_version") or "").strip(),
+        )
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        malicious_packages.append(match)
 
 
 def aggregate_package_locations(packages: List[Dict], scanned_path: str) -> List[Dict]:
@@ -427,17 +553,26 @@ def _perform_gated_live_refresh(
     selected_sources = resolve_sources(include_experimental=include_experimental_sources)
     candidate_raw_dir = tempfile.mkdtemp(prefix="candidate-raw-", dir=layout["staging"])
     candidate_final_dir = tempfile.mkdtemp(prefix="candidate-final-", dir=layout["staging"])
+    collector_cache_dir = os.path.join(promotion_root, "cache", attempt_id)
     if active_final_data_dir is None:
         _runtime_promotion_root, _runtime_live_updates_config, active_final_data_dir = (
             _load_live_update_runtime()
         )
 
     try:
-        collector_results = run_all_collectors(
-            sources=selected_sources,
-            include_experimental=include_experimental_sources,
-            raw_data_dir=candidate_raw_dir,
-        )
+        previous_collector_cache_dir = os.environ.get("OREWATCH_COLLECTOR_CACHE_DIR")
+        os.environ["OREWATCH_COLLECTOR_CACHE_DIR"] = collector_cache_dir
+        try:
+            collector_results = run_all_collectors(
+                sources=selected_sources,
+                include_experimental=include_experimental_sources,
+                raw_data_dir=candidate_raw_dir,
+            )
+        finally:
+            if previous_collector_cache_dir is None:
+                os.environ.pop("OREWATCH_COLLECTOR_CACHE_DIR", None)
+            else:
+                os.environ["OREWATCH_COLLECTOR_CACHE_DIR"] = previous_collector_cache_dir
         build_summary = build_databases(
             selected_sources=selected_sources,
             source_results=collector_results,
@@ -564,6 +699,7 @@ def _perform_gated_live_refresh(
         }
     finally:
         shutil.rmtree(candidate_raw_dir, ignore_errors=True)
+        shutil.rmtree(collector_cache_dir, ignore_errors=True)
         if os.path.exists(candidate_final_dir):
             shutil.rmtree(candidate_final_dir, ignore_errors=True)
 
@@ -955,6 +1091,15 @@ def run_scan(request: ScanRequest) -> ScanResult:
         threat_data_summary.get("database_statuses"),
     )
     data_metadata = _augment_data_metadata(data_metadata, threat_data_summary)
+    local_threat_ecosystems = {
+        str(entry.get("ecosystem", "")).lower().strip()
+        for entry in request.local_threat_packages
+        if int(entry.get("active", 1) or 0) == 1
+    }
+    local_threat_available = any(
+        ecosystem_name in local_threat_ecosystems
+        for ecosystem_name in requested_ecosystems
+    )
 
     if request.scan_packages and requested_ecosystems:
         if request.strict_data and data_metadata["data_status"] != "complete":
@@ -984,7 +1129,7 @@ def run_scan(request: ScanRequest) -> ScanResult:
                 message="; ".join(message_bits),
             )
 
-        if not data_metadata["usable_ecosystems"]:
+        if not data_metadata["usable_ecosystems"] and not local_threat_available:
             guidance = threat_data_summary.get("message")
             message = (
                 "No usable threat data available for requested ecosystem(s): "
@@ -1037,10 +1182,8 @@ def run_scan(request: ScanRequest) -> ScanResult:
                 packages_by_ecosystem.setdefault(pkg_eco, []).append(pkg)
 
             for eco in ecosystem:
-                if eco not in data_metadata["usable_ecosystems"]:
-                    continue
                 eco_packages = packages_by_ecosystem.get(eco, [])
-                if eco_packages:
+                if eco_packages and eco in data_metadata["usable_ecosystems"]:
                     logger.info("   Checking %d %s package(s)...", len(eco_packages), eco)
                     malicious = malicious_checker.check_malicious_packages(
                         eco_packages,
@@ -1049,6 +1192,23 @@ def run_scan(request: ScanRequest) -> ScanResult:
                         include_shai_hulud=True,
                     )
                     malicious_packages.extend(malicious)
+                    _append_local_matches(
+                        malicious_packages,
+                        _match_local_threat_packages(
+                            eco_packages,
+                            request.local_threat_packages,
+                            eco,
+                        ),
+                    )
+                elif eco_packages:
+                    _append_local_matches(
+                        malicious_packages,
+                        _match_local_threat_packages(
+                            eco_packages,
+                            request.local_threat_packages,
+                            eco,
+                        ),
+                    )
             ecosystem_str = ", ".join(ecosystem)
         else:
             ecosystem_str = ecosystem
@@ -1063,6 +1223,14 @@ def run_scan(request: ScanRequest) -> ScanResult:
                     final_data_dir=runtime_final_data_dir,
                     include_shai_hulud=True,
                 )
+            _append_local_matches(
+                malicious_packages,
+                _match_local_threat_packages(
+                    packages,
+                    request.local_threat_packages,
+                    ecosystem,
+                ),
+            )
     else:
         ecosystem_str = (
             ecosystem

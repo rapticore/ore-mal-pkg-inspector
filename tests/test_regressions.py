@@ -198,6 +198,82 @@ class ScannerRegressionTests(unittest.TestCase):
             [("requests", "2.32.0", "pypi"), ("flask", "", "pypi")],
         )
 
+    def test_run_scan_uses_local_threat_packages_when_official_data_is_unusable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project_dir = os.path.join(temp_dir, "project")
+            final_data_dir = os.path.join(temp_dir, "final-data")
+            os.makedirs(project_dir, exist_ok=True)
+            os.makedirs(final_data_dir, exist_ok=True)
+            package_json = os.path.join(project_dir, "package.json")
+            with open(package_json, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "name": "fixture",
+                        "version": "1.0.0",
+                        "dependencies": {"@tallyui/core": "1.0.0"},
+                    },
+                    handle,
+                )
+
+            database_statuses = {
+                ecosystem: {
+                    "exists": False,
+                    "usable": False,
+                    "data_status": "failed",
+                    "sources_used": [],
+                    "experimental_sources_used": [],
+                    "metadata_ready": False,
+                }
+                for ecosystem in ["npm", "pypi", "rubygems", "go", "maven", "cargo"]
+            }
+            threat_summary = {
+                "success": False,
+                "database_statuses": database_statuses,
+                "selected_sources": [],
+                "refresh_required": True,
+                "used_live_collection": False,
+                "promotion_decision": "",
+                "kept_last_known_good": False,
+                "anomalies": [],
+                "message": "No usable official data",
+            }
+
+            with patch(
+                "scanner_engine._load_live_update_runtime",
+                return_value=(os.path.join(temp_dir, "live"), {}, final_data_dir),
+            ):
+                with patch(
+                    "scanner_engine.get_current_threat_data_summary",
+                    return_value=threat_summary,
+                ):
+                    with patch(
+                        "scanner_engine.report_generator.generate_report",
+                        return_value=os.path.join(temp_dir, "report.json"),
+                    ):
+                        result = engine.run_scan(
+                            engine.ScanRequest(
+                                target_path=project_dir,
+                                ensure_data=False,
+                                print_summary=False,
+                                local_threat_packages=[
+                                    {
+                                        "id": 7,
+                                        "ecosystem": "npm",
+                                        "name": "@tallyui/core",
+                                        "name_normalized": "@tallyui/core",
+                                        "active": 1,
+                                        "reason": "Customer local intelligence",
+                                        "created_at": "2026-05-11T00:00:00Z",
+                                    }
+                                ],
+                            )
+                        )
+
+            self.assertEqual(result.exit_code, 1)
+            self.assertEqual(result.malicious_packages[0]["name"], "@tallyui/core")
+            self.assertEqual(result.malicious_packages[0]["sources"], ["local"])
+            self.assertEqual(result.malicious_packages[0]["local_threat_package_id"], 7)
+
     def test_cli_ioc_only_disables_ensure_data(self):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as temp_file:
             temp_file.write("requests==2.32.0\n")

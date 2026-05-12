@@ -40,6 +40,14 @@ ECOSYSTEMS = {
 }
 
 
+def _collector_cache_root():
+    """Return the cache root, preferring the monitor-owned refresh cache."""
+    override = os.environ.get("OREWATCH_COLLECTOR_CACHE_DIR", "").strip()
+    if override:
+        return os.path.join(override, 'osv')
+    return os.path.join(os.path.dirname(__file__), '.cache', 'osv')
+
+
 def _safe_extract_zip(zf, extract_dir):
     """
     Extract a ZIP file without allowing path traversal outside the destination directory.
@@ -81,6 +89,8 @@ def download_ecosystem_data(ecosystem_osv_name, cache_dir):
         urlretrieve(zip_url, zip_path)
 
         # Extract
+        if os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir)
         os.makedirs(extract_dir, exist_ok=True)
         with zipfile.ZipFile(zip_path, 'r') as zf:
             _safe_extract_zip(zf, extract_dir)
@@ -102,6 +112,12 @@ def download_ecosystem_data(ecosystem_osv_name, cache_dir):
     except Exception as e:
         logger.info("  Unexpected error for %s: %s", ecosystem_osv_name, e)
         return None
+    finally:
+        if os.path.exists(zip_path):
+            try:
+                os.remove(zip_path)
+            except OSError:
+                pass
 
 
 def parse_osv_entry(data):
@@ -262,7 +278,7 @@ def fetch_osv_packages():
     logger.info("Fetching from OSV.dev (bulk download)...")
 
     # Create cache directory
-    cache_dir = os.path.join(os.path.dirname(__file__), '.cache', 'osv')
+    cache_dir = _collector_cache_root()
     os.makedirs(cache_dir, exist_ok=True)
 
     all_packages = []
@@ -278,7 +294,10 @@ def fetch_osv_packages():
             continue
 
         # Collect malicious packages
-        packages = collect_ecosystem(extract_dir, ecosystem_normalized)
+        try:
+            packages = collect_ecosystem(extract_dir, ecosystem_normalized)
+        finally:
+            shutil.rmtree(extract_dir, ignore_errors=True)
 
         if packages:
             all_packages.extend(packages)

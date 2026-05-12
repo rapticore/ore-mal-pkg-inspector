@@ -31,6 +31,14 @@ MALICIOUS_PATH = "osv/malicious"
 ECOSYSTEMS = ['npm', 'pypi', 'go', 'rubygems', 'maven', 'crates.io', 'nuget']
 
 
+def get_cache_dir():
+    """Return the cache path, preferring the monitor-owned refresh cache."""
+    override = os.environ.get("OREWATCH_COLLECTOR_CACHE_DIR", "").strip()
+    if override:
+        return os.path.join(override, 'ossf-repo')
+    return CACHE_DIR
+
+
 def clone_or_update_repo():
     """
     Clone the OpenSSF malicious-packages repo or update if exists
@@ -39,27 +47,28 @@ def clone_or_update_repo():
     Returns:
         str: Path to repo root, or None on error
     """
-    if os.path.exists(os.path.join(CACHE_DIR, '.git')):
+    cache_dir = get_cache_dir()
+    if os.path.exists(os.path.join(cache_dir, '.git')):
         logger.info("  Updating existing repo cache...")
         try:
             subprocess.run(
                 ['git', 'pull', '--depth', '1'],
-                cwd=CACHE_DIR,
+                cwd=cache_dir,
                 capture_output=True,
                 timeout=300
             )
-            return CACHE_DIR
+            return cache_dir
         except Exception as e:
             logger.info("Warning: Could not update repo: %s", e)
             print("  Using existing cache...")
-            return CACHE_DIR
+            return cache_dir
 
     print("  Cloning repository (this may take a few minutes)...")
-    os.makedirs(os.path.dirname(CACHE_DIR), exist_ok=True)
+    os.makedirs(os.path.dirname(cache_dir), exist_ok=True)
 
     try:
         result = subprocess.run(
-            ['git', 'clone', '--depth', '1', REPO_URL, CACHE_DIR],
+            ['git', 'clone', '--depth', '1', REPO_URL, cache_dir],
             capture_output=True,
             text=True,
             timeout=600
@@ -67,7 +76,7 @@ def clone_or_update_repo():
         if result.returncode != 0:
             logger.info("Error cloning repo: %s", result.stderr)
             return None
-        return CACHE_DIR
+        return cache_dir
     except subprocess.TimeoutExpired:
         print("  Error: Clone timed out")
         return None

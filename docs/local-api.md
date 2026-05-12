@@ -60,6 +60,7 @@ Returns:
 - `final_data_dir`
 - active finding count and highest active severity
 - recent notifications preview
+- threat-intelligence refresh runtime state
 - supported ecosystems
 - supported package managers
 - supported client types
@@ -127,6 +128,66 @@ Each notification includes:
 - `kind`
 - `message`
 - `created_at`
+
+### `POST /v1/threat-data/refresh`
+
+Starts an immediate threat-intelligence refresh in addition to the scheduled
+refresh cadence.
+
+Request:
+
+```json
+{
+  "force": true,
+  "wait": false
+}
+```
+
+By default `wait` is `false`, so the API returns after starting a background
+refresh. Set `wait` to `true` only for clients that can tolerate a long-running
+request.
+
+### `GET /v1/local-threat/packages`
+
+Returns user-managed local malicious package names. These names are checked
+alongside official threat intelligence and remain active until removed or
+auto-retired after official threat intelligence includes them.
+
+OreWatch also seeds this same local overlay with temporary bundled intelligence
+for active supply-chain campaigns when official upstream feeds lag. Those
+entries behave like local entries: they block immediately and are retired after
+official threat intelligence covers the same affected versions.
+
+Supported query params:
+
+- `active_only` (`true` by default)
+- `ecosystem`
+
+### `POST /v1/local-threat/packages`
+
+Adds a user-managed local package name.
+
+```json
+{
+  "ecosystem": "npm",
+  "name": "@draftlab/auth",
+  "versions": ["0.24.1", "0.24.2"],
+  "reason": "Customer-confirmed compromise"
+}
+```
+
+Omit `versions` to block every version of the package name locally. Supplying
+exact versions limits the local detection to those versions.
+
+### `POST /v1/local-threat/packages/{id}/retire`
+
+Retires a local package entry.
+
+```json
+{
+  "reason": "Official threat intelligence now covers this package"
+}
+```
 
 ### `POST /v1/check/dependency-add`
 
@@ -329,7 +390,9 @@ Common API integration pattern:
 2. Read the bearer token from `token_path`.
 3. Call `POST /v1/check/dependency-add` before dependency-install flows.
 4. Call `POST /v1/check/manifest` when a supported manifest is saved or explicitly rechecked.
-5. Poll `GET /v1/findings/active` and `GET /v1/notifications` for durable background-monitor alerts.
+5. Call `POST /v1/threat-data/refresh` when the user explicitly requests current threat intelligence.
+6. Use `POST /v1/local-threat/packages` for customer-local package names that should be detected before official TI updates.
+7. Poll `GET /v1/findings/active` and `GET /v1/notifications` for durable background-monitor alerts.
 
 Xcode caveat:
 
@@ -345,9 +408,13 @@ OreWatch background detections are intentionally available through multiple surf
 - CLI:
   - `orewatch monitor findings`
   - `orewatch monitor notifications`
+  - `orewatch monitor refresh-threat-data`
+  - `orewatch monitor local-threat add|list|remove`
 - Local API:
   - `GET /v1/findings/active`
   - `GET /v1/notifications`
+  - `POST /v1/threat-data/refresh`
+  - `GET|POST /v1/local-threat/packages`
 - MCP:
   - `orewatch_list_active_findings`
   - `orewatch_list_notifications`

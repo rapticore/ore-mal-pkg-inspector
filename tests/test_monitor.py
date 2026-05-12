@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 from collectors import db as collector_db
 from monitor import api as monitor_api_module
 from monitor.api import monitor_api_request
+from monitor.bundled_local_threats import BUNDLED_LOCAL_THREAT_PACKAGES
 from monitor.cli import run_monitor_cli
 from monitor.config import DEFAULT_CONFIG
 from monitor.config import get_legacy_monitor_paths
@@ -37,6 +38,9 @@ from monitor.menubar import MenuBarSnapshot
 from monitor.menubar import build_menu_bar_title
 from monitor.menubar import build_menu_bar_tooltip
 from monitor.menubar import count_unacknowledged_alert_notifications
+from monitor.menubar import finding_dependency_path_label
+from monitor.menubar import finding_manifest_path
+from monitor.menubar import finding_primary_label
 from monitor.menubar import format_notification_context
 from monitor.menubar import latest_attention_notification
 from monitor.menubar import notification_requires_attention
@@ -1713,6 +1717,218 @@ class MonitorTests(unittest.TestCase):
             self.assertIn("supported_ecosystems", health)
             stored = service.state.get_dependency_check(response["check_id"])
             self.assertEqual(stored["client_type"], "codex")
+
+    def test_local_threat_package_blocks_dependency_check_and_auto_retires(self):
+        with tempfile.TemporaryDirectory() as repo_root:
+            service = MonitorService(repo_root)
+            added = service.add_local_threat_package(
+                "npm",
+                "@draftlab/auth",
+                reason="Customer-confirmed compromise",
+            )
+
+            with patch("monitor.service.get_database_statuses", return_value=_build_database_statuses()):
+                with patch.object(service.package_checker, "check_packages", return_value=[]):
+                    response = service.handle_dependency_add_check(
+                        {
+                            "client_type": "codex",
+                            "project_path": repo_root,
+                            "ecosystem": "npm",
+                            "package_manager": "npm",
+                            "operation": "add",
+                            "dependencies": [
+                                {
+                                    "name": "@draftlab/auth",
+                                    "requested_spec": "1.0.0",
+                                    "resolved_version": "1.0.0",
+                                }
+                            ],
+                            "source": {
+                                "kind": "agent_command",
+                                "command": "npm install @draftlab/auth@1.0.0",
+                            },
+                        }
+                    )
+
+            self.assertEqual(response["decision"], "override_required")
+            self.assertEqual(response["results"][0]["sources"], ["local"])
+            self.assertEqual(
+                response["results"][0]["local_threat_package_id"],
+                added["package"]["id"],
+            )
+
+            def fake_check_packages(packages, ecosystem, include_shai_hulud=False):
+                if ecosystem != "npm":
+                    return []
+                if packages and packages[0].get("name") == "@draftlab/auth":
+                    return [{"name": "@draftlab/auth"}]
+                return []
+
+            with patch.object(service.package_checker, "check_packages", side_effect=fake_check_packages):
+                retired = service.retire_local_threat_packages_now_in_ti()
+
+            self.assertEqual(retired["retired_count"], 1)
+            self.assertNotIn(
+                "@draftlab/auth",
+                {entry["name"] for entry in service.list_local_threat_packages()["packages"]},
+            )
+
+    def test_bundled_mini_shai_hulud_feed_blocks_exact_versions_only(self):
+        self.assertEqual(len(BUNDLED_LOCAL_THREAT_PACKAGES), 169)
+        with tempfile.TemporaryDirectory() as repo_root:
+            service = MonitorService(repo_root)
+            statuses = _build_database_statuses()
+
+            def check_dependency(version):
+                with patch("monitor.service.get_database_statuses", return_value=statuses):
+                    with patch.object(service.package_checker, "check_packages", return_value=[]):
+                        return service.handle_dependency_add_check(
+                            {
+                                "client_type": "codex",
+                                "project_path": repo_root,
+                                "ecosystem": "npm",
+                                "package_manager": "npm",
+                                "operation": "add",
+                                "dependencies": [
+                                    {
+                                        "name": "@tanstack/react-router",
+                                        "requested_spec": version,
+                                        "resolved_version": version,
+                                    }
+                                ],
+                                "source": {
+                                    "kind": "agent_command",
+                                    "command": f"npm install @tanstack/react-router@{version}",
+                                },
+                            }
+                        )
+
+            compromised = check_dependency("1.169.5")
+            clean_neighbor = check_dependency("1.169.4")
+
+            self.assertEqual(compromised["decision"], "override_required")
+            self.assertEqual(compromised["results"][0]["sources"], ["local"])
+            self.assertEqual(compromised["results"][0]["affected_versions"], ["1.169.5", "1.169.8"])
+            self.assertEqual(clean_neighbor["decision"], "allow")
+
+    def test_bundled_mini_shai_hulud_entry_retires_when_official_ti_has_all_versions(self):
+        with tempfile.TemporaryDirectory() as repo_root:
+            service = MonitorService(repo_root)
+
+            def fake_check_packages(packages, ecosystem, include_shai_hulud=False):
+                if ecosystem != "npm" or not packages:
+                    return []
+                package = packages[0]
+                if package.get("name") == "@tanstack/react-router" and package.get("version") in {
+                    "1.169.5",
+                    "1.169.8",
+                }:
+                    return [{"name": "@tanstack/react-router"}]
+                return []
+
+            with patch.object(service.package_checker, "check_packages", side_effect=fake_check_packages):
+                retired = service.retire_local_threat_packages_now_in_ti()
+
+            self.assertEqual(retired["retired_count"], 1)
+            active = {
+                entry["name"]
+                for entry in service.list_local_threat_packages(active_only=True)["packages"]
+            }
+            self.assertNotIn("@tanstack/react-router", active)
+
+    def test_local_api_manages_local_threat_packages_and_starts_refresh(self):
+        with tempfile.TemporaryDirectory() as repo_root:
+            service = MonitorService(repo_root)
+
+            def call_api(method, path, payload=None):
+                handler = object.__new__(monitor_api_module._MonitorAPIHandler)
+                handler.path = path
+                raw_body = json.dumps(payload or {}).encode("utf-8")
+                handler.rfile = io.BytesIO(raw_body)
+                handler.headers = {
+                    "Authorization": f"Bearer {service.api_token}",
+                    "Content-Length": str(len(raw_body)),
+                }
+                handler.server = type(
+                    "FakeServer",
+                    (),
+                    {"service": service, "api_token": service.api_token},
+                )()
+                captured = {}
+
+                def fake_write_json(status_code, response_payload):
+                    captured["status_code"] = status_code
+                    captured["payload"] = response_payload
+
+                handler._write_json = fake_write_json
+                if method == "GET":
+                    handler.do_GET()
+                else:
+                    handler.do_POST()
+                self.assertIn("payload", captured)
+                return captured["status_code"], captured["payload"]
+
+            status, added = call_api(
+                "POST",
+                "/v1/local-threat/packages",
+                {
+                    "ecosystem": "npm",
+                    "name": "@customer/local-only",
+                    "reason": "Customer override",
+                },
+            )
+            self.assertEqual(status, 200)
+            package_id = added["package"]["id"]
+
+            status, listed = call_api("GET", "/v1/local-threat/packages")
+            self.assertEqual(status, 200)
+            self.assertIn(
+                "@customer/local-only",
+                {entry["name"] for entry in listed["packages"]},
+            )
+
+            with patch.object(
+                service,
+                "refresh_threat_data_async",
+                return_value={"success": True, "started": True, "message": "started"},
+            ) as refresh:
+                status, refresh_response = call_api("POST", "/v1/threat-data/refresh", {})
+
+            self.assertEqual(status, 200)
+            self.assertTrue(refresh_response["started"])
+            refresh.assert_called_once_with(force=True, reason="api")
+
+            status, retired = call_api(
+                "POST",
+                f"/v1/local-threat/packages/{package_id}/retire",
+                {"reason": "No longer needed"},
+            )
+            self.assertEqual(status, 200)
+            self.assertFalse(bool(retired["package"]["active"]))
+
+    def test_menubar_finding_labels_preserve_dependency_manifest_path(self):
+        with tempfile.TemporaryDirectory() as project_root:
+            manifest_path = os.path.join(project_root, "apps", "npm-app", "package.json")
+            finding = {
+                "project_path": project_root,
+                "severity": "critical",
+                "package_name": "@draftlab/auth",
+                "package_version": "1.0.0",
+                "payload": {
+                    "locations": [
+                        {
+                            "physicalLocation": {
+                                "artifactLocation": {"uri": "apps/npm-app/package.json"},
+                                "region": {"startLine": 42},
+                            }
+                        }
+                    ]
+                },
+            }
+
+            self.assertEqual(finding_primary_label(finding), "[CRITICAL] @draftlab/auth@1.0.0")
+            self.assertEqual(finding_manifest_path(finding), manifest_path)
+            self.assertEqual(finding_dependency_path_label(finding), f"{manifest_path}:42")
 
     def test_dependency_add_normalizes_legacy_file_path_source_kind(self):
         with tempfile.TemporaryDirectory() as repo_root:

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import threading
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +23,7 @@ from monitor.config import OWNER_ONLY_FILE_MODE
 from monitor.config import ensure_owner_only_permissions
 from monitor.config import ensure_not_symlink
 from monitor.config import get_monitor_paths
+from scanners.supported_files import ECOSYSTEM_PRIORITY
 
 
 MAC_MENUBAR_OPTIONAL_DEPENDENCY = "pyobjc-framework-Cocoa"
@@ -102,8 +103,12 @@ class MenuBarSnapshot:
     log_file: str
     api_base_url: str
     watch_count: int
+    local_threat_packages: List[Dict[str, Any]] = field(default_factory=list)
     last_live_promotion_at: str = ""
     last_live_promotion_status: str = ""
+    threat_refresh_running: bool = False
+    threat_refresh_status: str = ""
+    threat_refresh_message: str = ""
     last_action_message: str = ""
 
 
@@ -112,6 +117,17 @@ def _truncate(text: str, limit: int = 80) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: max(limit - 3, 0)] + "..."
+
+
+def _truncate_middle(text: str, limit: int = 120) -> str:
+    normalized = " ".join(str(text).split())
+    if len(normalized) <= limit:
+        return normalized
+    if limit <= 5:
+        return normalized[: max(limit - 3, 0)] + "..."
+    head = max((limit - 5) // 2, 1)
+    tail = max(limit - 5 - head, 1)
+    return f"{normalized[:head]} ... {normalized[-tail:]}"
 
 
 def _selector(method_name: str) -> str:
@@ -386,6 +402,58 @@ def format_notification_context(notification: Dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
+def finding_primary_label(finding: Dict[str, Any]) -> str:
+    """Render the first line for an active finding menu entry."""
+    severity = str(finding.get("severity", "unknown") or "unknown").upper()
+    package_name = str(
+        finding.get("package_name")
+        or (finding.get("payload", {}) or {}).get("name")
+        or ""
+    ).strip()
+    version = str(
+        finding.get("package_version")
+        or (finding.get("payload", {}) or {}).get("version")
+        or ""
+    ).strip()
+    if package_name:
+        dependency = f"{package_name}@{version}" if version else package_name
+        return f"[{severity}] {dependency}"
+    return f"[{severity}] {finding.get('title', 'Finding')}"
+
+
+def finding_manifest_path(finding: Dict[str, Any]) -> str:
+    """Return the concrete manifest path for a finding when one is available."""
+    payload = dict(finding.get("payload", {}) or {})
+    locations = payload.get("locations") or finding.get("locations") or []
+    project_path = str(finding.get("project_path", "") or "").strip()
+    if not isinstance(locations, list) or not locations:
+        return project_path
+
+    location = locations[0] if isinstance(locations[0], dict) else {}
+    physical_location = location.get("physicalLocation", {}) or {}
+    artifact_location = physical_location.get("artifactLocation", {}) or {}
+    uri = str(artifact_location.get("uri", "") or "").strip()
+    if not uri:
+        return project_path
+    if os.path.isabs(uri):
+        return uri
+    return os.path.abspath(os.path.join(project_path, uri))
+
+
+def finding_dependency_path_label(finding: Dict[str, Any]) -> str:
+    """Return a full manifest path label, including line when available."""
+    manifest_path = finding_manifest_path(finding)
+    payload = dict(finding.get("payload", {}) or {})
+    locations = payload.get("locations") or finding.get("locations") or []
+    if isinstance(locations, list) and locations:
+        location = locations[0] if isinstance(locations[0], dict) else {}
+        region = (location.get("physicalLocation", {}) or {}).get("region", {}) or {}
+        start_line = region.get("startLine") or region.get("start_line")
+        if start_line:
+            return f"{manifest_path}:{start_line}"
+    return manifest_path
+
+
 def latest_alert_target_path(
     snapshot: MenuBarSnapshot,
     notification: Dict[str, Any],
@@ -555,6 +623,7 @@ def collect_menu_bar_snapshot(
     findings = service.list_active_findings(limit=findings_limit)
     notifications = service.list_recent_notifications(limit=notifications_limit)
     watch_summary = status.get("watch_summary", {}) or {}
+    local_threat = service.list_local_threat_packages(active_only=True)
     return MenuBarSnapshot(
         running=bool(status.get("running")),
         api_listening=bool(status.get("api_listening")),
@@ -568,8 +637,12 @@ def collect_menu_bar_snapshot(
         log_file=str(service.paths["log_file"]),
         api_base_url=str(status.get("api_base_url") or service.get_connection_info()["base_url"]),
         watch_count=int(watch_summary.get("watched_projects", 0) or 0),
+        local_threat_packages=list(local_threat.get("packages", [])),
         last_live_promotion_at=str(status.get("last_live_promotion_at") or ""),
         last_live_promotion_status=str(status.get("last_live_promotion_status") or ""),
+        threat_refresh_running=bool(status.get("threat_refresh_running")),
+        threat_refresh_status=str(status.get("threat_refresh_status") or ""),
+        threat_refresh_message=str(status.get("threat_refresh_message") or ""),
         last_action_message=last_action_message,
     )
 
@@ -933,6 +1006,10 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
         def _open_path(self, path: str) -> None:
             if not path:
                 return
+            if ":" in path and not os.path.exists(path):
+                candidate, _line = path.rsplit(":", 1)
+                if os.path.exists(candidate):
+                    path = candidate
             # Validate the path before opening to prevent path traversal.
             path = os.path.abspath(path)
             if "\x00" in path or os.path.islink(path):
@@ -941,6 +1018,53 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
             if workspace.openFile_(path):
                 return
             subprocess.run(["open", path], check=False)
+
+        def _copy_text(self, text: str) -> None:
+            pasteboard = AppKit.NSPasteboard.generalPasteboard()
+            pasteboard.clearContents()
+            pasteboard_type = getattr(AppKit, "NSPasteboardTypeString", "public.utf8-plain-text")
+            pasteboard.setString_forType_(str(text), pasteboard_type)
+
+        def _prompt_local_threat_package(self) -> Optional[Dict[str, str]]:
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Add Local Package")
+            alert.setInformativeText_(
+                "OreWatch will flag this package name locally until official threat intelligence includes it."
+            )
+            alert.addButtonWithTitle_("Add")
+            alert.addButtonWithTitle_("Cancel")
+
+            view = AppKit.NSView.alloc().initWithFrame_(Foundation.NSMakeRect(0, 0, 360, 108))
+            ecosystem_picker = AppKit.NSPopUpButton.alloc().initWithFrame_pullsDown_(
+                Foundation.NSMakeRect(0, 78, 150, 24),
+                False,
+            )
+            ecosystem_picker.addItemsWithTitles_(list(ECOSYSTEM_PRIORITY))
+            name_field = AppKit.NSTextField.alloc().initWithFrame_(
+                Foundation.NSMakeRect(0, 42, 360, 24)
+            )
+            name_field.setPlaceholderString_("Package name")
+            reason_field = AppKit.NSTextField.alloc().initWithFrame_(
+                Foundation.NSMakeRect(0, 6, 360, 24)
+            )
+            reason_field.setPlaceholderString_("Reason (optional)")
+            view.addSubview_(ecosystem_picker)
+            view.addSubview_(name_field)
+            view.addSubview_(reason_field)
+            alert.setAccessoryView_(view)
+
+            response = alert.runModal()
+            ok_value = getattr(AppKit, "NSAlertFirstButtonReturn", 1000)
+            if int(response) != int(ok_value):
+                return None
+            name = str(name_field.stringValue() or "").strip()
+            if not name:
+                return None
+            return {
+                "ecosystem": str(ecosystem_picker.titleOfSelectedItem() or "npm").strip().lower(),
+                "name": name,
+                "reason": str(reason_field.stringValue() or "").strip(),
+            }
 
         def _choose_directory(self) -> Optional[str]:
             panel = AppKit.NSOpenPanel.openPanel()
@@ -1049,6 +1173,12 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
             self.menu.addItem_(
                 self._make_item(f"Watched projects: {snapshot.watch_count}", enabled=False)
             )
+            refresh_status = "Updating" if snapshot.threat_refresh_running else (
+                snapshot.threat_refresh_status or "Idle"
+            )
+            self.menu.addItem_(
+                self._make_item(f"Threat intelligence: {refresh_status}", enabled=False)
+            )
             if snapshot.last_action_message:
                 self.menu.addItem_(
                     self._make_item(_truncate(snapshot.last_action_message, 90), enabled=False)
@@ -1064,24 +1194,89 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
                 self.menu.addItem_(self._make_item("No recent notifications", enabled=False))
 
             self.menu.addItem_(AppKit.NSMenuItem.separatorItem())
+            self.menu.addItem_(self._make_item("Threat intelligence", enabled=False))
+            self.menu.addItem_(
+                self._make_item(
+                    "Update Threat Intelligence",
+                    _selector("updateThreatData_"),
+                    enabled=not snapshot.threat_refresh_running,
+                )
+            )
+            self.menu.addItem_(
+                self._make_item(
+                    f"Local package names: {len(snapshot.local_threat_packages)}",
+                    enabled=False,
+                )
+            )
+            self.menu.addItem_(
+                self._make_item("Add Local Package...", _selector("addLocalThreatPackage_"))
+            )
+            for entry in snapshot.local_threat_packages[:6]:
+                label = f"Remove {entry.get('ecosystem', '')}/{entry.get('name', '')}"
+                self.menu.addItem_(
+                    self._make_item(
+                        _truncate(label, 90),
+                        _selector("removeLocalThreatPackage_"),
+                        {
+                            "id": int(entry.get("id", 0) or 0),
+                            "name": str(entry.get("name", "")),
+                            "ecosystem": str(entry.get("ecosystem", "")),
+                        },
+                        enabled=bool(entry.get("id")),
+                    )
+                )
+            if len(snapshot.local_threat_packages) > 6:
+                self.menu.addItem_(
+                    self._make_item(
+                        f"{len(snapshot.local_threat_packages) - 6} more local package names",
+                        enabled=False,
+                    )
+                )
+
+            self.menu.addItem_(AppKit.NSMenuItem.separatorItem())
             if snapshot.active_findings_preview:
                 self.menu.addItem_(self._make_item("Active findings", enabled=False))
                 for finding in snapshot.active_findings_preview:
-                    label = f"[{str(finding.get('severity', 'unknown')).upper()}] {finding.get('title', 'Finding')}"
                     target_path = str(
                         finding.get("html_report_path")
                         or finding.get("report_path")
                         or finding.get("project_path")
                         or snapshot.reports_dir
                     )
+                    dependency_path = finding_dependency_path_label(finding)
+                    manifest_path = finding_manifest_path(finding)
                     self.menu.addItem_(
                         self._make_item(
-                            _truncate(label, 90),
+                            _truncate(finding_primary_label(finding), 90),
                             _selector("openFinding_"),
                             {"path": target_path},
                             enabled=bool(target_path),
                         )
                     )
+                    if dependency_path:
+                        self.menu.addItem_(
+                            self._make_item(
+                                _truncate_middle(dependency_path, 130),
+                                enabled=False,
+                            )
+                        )
+                        self.menu.addItem_(
+                            self._make_item(
+                                "Copy Full Dependency Path",
+                                _selector("copyFindingDependencyPath_"),
+                                {"text": dependency_path},
+                                enabled=True,
+                            )
+                        )
+                    if manifest_path:
+                        self.menu.addItem_(
+                            self._make_item(
+                                "Reveal Dependency Manifest",
+                                _selector("openFinding_"),
+                                {"path": manifest_path},
+                                enabled=True,
+                            )
+                        )
             else:
                 self.menu.addItem_(self._make_item("No active findings", enabled=False))
 
@@ -1116,7 +1311,7 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
                     )
                 )
             self.menu.addItem_(AppKit.NSMenuItem.separatorItem())
-            self.menu.addItem_(self._make_item("Refresh Now", _selector("refresh_")))
+            self.menu.addItem_(self._make_item("Refresh Menu", _selector("refresh_")))
             self.menu.addItem_(self._make_item("Run Quick Scan", _selector("runQuickScan_")))
             self.menu.addItem_(self._make_item("Run Full Scan", _selector("runFullScan_")))
             if snapshot.running:
@@ -1130,6 +1325,15 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
         def openFinding_(self, sender):
             payload = self._menu_payload(sender)
             self._open_path(str(payload.get("path", "")))
+
+        def copyFindingDependencyPath_(self, sender):
+            payload = self._menu_payload(sender)
+            text = str(payload.get("text", "") or "")
+            if not text:
+                return
+            self._copy_text(text)
+            self.last_action_message = "Copied dependency path"
+            self.refresh_(None)
 
         def openReportsFolder_(self, _sender):
             self._open_path(self.service.paths["reports"])
@@ -1157,6 +1361,32 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
                 lambda: self.service.add_watched_project(path, initial_scan_kind="quick"),
             )
 
+        def addLocalThreatPackage_(self, _sender):
+            entry = self._prompt_local_threat_package()
+            if entry is None:
+                self.last_action_message = "Add local package cancelled"
+                self.refresh_(None)
+                return
+            self._start_async_action(
+                f"Adding local package {entry['ecosystem']}/{entry['name']}...",
+                lambda: self.service.add_local_threat_package(
+                    entry["ecosystem"],
+                    entry["name"],
+                    reason=entry.get("reason", ""),
+                ),
+            )
+
+        def removeLocalThreatPackage_(self, sender):
+            payload = self._menu_payload(sender)
+            package_id = int(payload.get("id", 0) or 0)
+            label = f"{payload.get('ecosystem', '')}/{payload.get('name', '')}"
+            if package_id <= 0:
+                return
+            self._start_async_action(
+                f"Removing local package {label}...",
+                lambda: self.service.retire_local_threat_package(package_id),
+            )
+
         def toggleNotificationSetting_(self, sender):
             payload = self._menu_payload(sender)
             key = str(payload.get("key", "")).strip()
@@ -1172,6 +1402,12 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
 
         def runFullScan_(self, _sender):
             self._start_async_action("Running full scan...", lambda: self.service.scan_now(full=True))
+
+        def updateThreatData_(self, _sender):
+            self._start_async_action(
+                "Updating threat intelligence...",
+                lambda: self.service.refresh_threat_data(force=True, reason="menubar"),
+            )
 
         def markAlertsReviewed_(self, _sender):
             result = self.service.mark_alerts_reviewed()

@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.2.5 - 2026-05-11
+
+- Added a manual threat-intelligence refresh path across CLI, local API, and the macOS menu bar so users can request an immediate update outside the scheduled cadence.
+- Added user-global local malicious package names, including menu bar add/remove controls, API/CLI management, exact affected-version support, and automatic retirement once official threat intelligence catches up.
+- Seeded the same local-threat overlay with the StepSecurity Mini Shai-Hulud npm package/version list from May 11, 2026 so newly reported compromised packages block immediately while upstream feeds lag.
+- Improved menu bar findings so long compromised dependency manifest paths remain accessible via a full-path copy action and a reveal-manifest action.
+- Hardened live update failures by serializing refreshes with a lock, tracking refresh runtime state, moving collector caches into monitor-owned per-refresh directories, cleaning stale staging, and clearing stale OSV extraction trees.
+- Verified the release with `python3.14 -m json.tool package.json`, `python3.14 -m py_compile ...`, `PYTHONPATH=. pytest tests/`, `python3.14 -m build`, and `python3.14 -m twine check`.
+
 ## 1.2.4 - 2026-05-11
 
 - Improved the macOS menu bar install error: when PyObjC is missing, OreWatch now suggests the documented `orewatch[mac-menubar]` pip extra and `pipx inject orewatch pyobjc-framework-Cocoa`, and explicitly calls out that Homebrew's isolated libexec virtualenv will not pick up a separate `pip install`.

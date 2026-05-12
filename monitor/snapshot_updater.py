@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
 from collectors.live_update import (
+    cleanup_stale_staging,
     merge_live_update_config,
     prune_backup_dirs,
     write_backup_manifest,
@@ -506,6 +507,13 @@ class SnapshotUpdater:
         interval_seconds = int(
             self.config.get("snapshots", {}).get("refresh_interval_seconds", 6 * 60 * 60)
         )
+        live_updates_config = self.config.get("live_updates", {})
+        if live_updates_config.get("enabled", True):
+            live_config = merge_live_update_config(live_updates_config)
+            cleanup_stale_staging(
+                os.path.join(self.paths["snapshots"], "live-updates", "staging"),
+                int(live_config.get("staging_max_age_seconds", 3600)),
+            )
         last_refresh = self.state.get_agent_state("last_threat_refresh_at")
         if not force and last_refresh:
             last_refresh_dt = datetime.strptime(last_refresh, "%Y-%m-%dT%H:%M:%SZ").replace(
@@ -519,7 +527,6 @@ class SnapshotUpdater:
                 }
 
         snapshots_config = self.config.get("snapshots", {})
-        live_updates_config = self.config.get("live_updates", {})
         snapshot_source = snapshots_config.get("channel_url") or snapshots_config.get("manifest_url")
         public_key_path = snapshots_config.get("public_key_path", "")
         if snapshot_source:

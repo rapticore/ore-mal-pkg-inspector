@@ -54,6 +54,7 @@ SUPPORTED_PACKAGE_MANAGERS = sorted(
         for package_manager in package_managers
     }
 )
+LOCAL_THREAT_ALLOWED_FIELDS = {"ecosystem", "name", "reason", "versions"}
 LITERAL_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._!+-]*$")
 NON_EXACT_SPEC_TOKENS = (
     " ",
@@ -247,6 +248,40 @@ def validate_client_request(payload: Dict[str, Any], manifest: bool = False) -> 
     normalize_source_input(payload.get("source"))
 
 
+def validate_local_threat_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate a user-managed local malicious package entry."""
+    unknown_fields = sorted(set(payload) - LOCAL_THREAT_ALLOWED_FIELDS)
+    if unknown_fields:
+        allowed = ", ".join(sorted(LOCAL_THREAT_ALLOWED_FIELDS))
+        raise ValueError(
+            f"Unsupported local threat field(s): {', '.join(unknown_fields)}; "
+            f"allowed fields: {allowed}"
+        )
+
+    ecosystem = str(payload.get("ecosystem", "") or "").strip().lower()
+    if ecosystem not in ECOSYSTEM_PRIORITY:
+        expected = ", ".join(ECOSYSTEM_PRIORITY)
+        raise ValueError(f"Unsupported ecosystem; expected one of: {expected}")
+
+    name = str(payload.get("name", "") or "").strip()
+    if not name:
+        raise ValueError("name is required")
+
+    versions_raw = payload.get("versions", [])
+    if versions_raw is None:
+        versions_raw = []
+    if not isinstance(versions_raw, list):
+        raise ValueError("versions must be an array")
+    versions = [str(version or "").strip() for version in versions_raw if str(version or "").strip()]
+
+    return {
+        "ecosystem": ecosystem,
+        "name": name,
+        "reason": str(payload.get("reason", "") or "").strip(),
+        "versions": versions,
+    }
+
+
 def monitor_api_request(
     base_url: str,
     token: str,
@@ -360,6 +395,22 @@ class _MonitorAPIHandler(BaseHTTPRequestHandler):
             raise ValueError("limit must be a positive integer")
         return value
 
+    def _query_bool(
+        self,
+        query: Dict[str, List[str]],
+        key: str,
+        default: bool = False,
+    ) -> bool:
+        raw = self._query_value(query, key)
+        if raw is None:
+            return default
+        normalized = raw.lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"{key} must be a boolean")
+
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         self.server.service.logger.debug("monitor api: " + format, *args)
 
@@ -390,6 +441,20 @@ class _MonitorAPIHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
+            if route == "/v1/local-threat/packages":
+                ecosystem = self._query_value(query, "ecosystem")
+                ecosystem = ecosystem.lower() if ecosystem is not None else None
+                if ecosystem is not None and ecosystem not in ECOSYSTEM_PRIORITY:
+                    self._write_json(400, {"error": "Unsupported ecosystem"})
+                    return
+                self._write_json(
+                    200,
+                    self.server.service.list_local_threat_packages(
+                        active_only=self._query_bool(query, "active_only", default=True),
+                        ecosystem=ecosystem,
+                    ),
+                )
+                return
             self._write_json(404, {"error": "Not found"})
         except ValueError as exc:
             self._write_json(400, {"error": str(exc)})
@@ -412,6 +477,42 @@ class _MonitorAPIHandler(BaseHTTPRequestHandler):
                     self._write_json(400, {"error": "Invalid check_id"})
                     return
                 self._write_json(200, self.server.service.handle_dependency_override(check_id, payload))
+                return
+            if route == "/v1/threat-data/refresh":
+                wait = bool(payload.get("wait", False))
+                force = bool(payload.get("force", True))
+                if wait:
+                    result = self.server.service.refresh_threat_data(force=force, reason="api")
+                else:
+                    result = self.server.service.refresh_threat_data_async(force=force, reason="api")
+                self._write_json(200 if result.get("success") else 409, result)
+                return
+            if route == "/v1/local-threat/packages":
+                entry = validate_local_threat_payload(payload)
+                self._write_json(
+                    200,
+                    self.server.service.add_local_threat_package(
+                        entry["ecosystem"],
+                        entry["name"],
+                        reason=entry["reason"],
+                        versions=entry["versions"],
+                    ),
+                )
+                return
+            if route.startswith("/v1/local-threat/packages/") and route.endswith("/retire"):
+                package_id_raw = route[
+                    len("/v1/local-threat/packages/") : -len("/retire")
+                ].strip("/")
+                if not package_id_raw.isdigit():
+                    self._write_json(400, {"error": "Invalid package id"})
+                    return
+                self._write_json(
+                    200,
+                    self.server.service.retire_local_threat_package(
+                        int(package_id_raw),
+                        reason=str(payload.get("reason", "Removed by user") or "Removed by user"),
+                    ),
+                )
                 return
             self._write_json(404, {"error": "Not found"})
         except ValueError as exc:

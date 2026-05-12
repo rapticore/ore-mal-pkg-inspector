@@ -22,6 +22,7 @@ from monitor.service import MonitorService
 from monitor.snapshot_updater import build_snapshot
 from monitor.snapshot_updater import generate_keypair
 from monitor.snapshot_updater import publish_snapshot
+from scanners.supported_files import ECOSYSTEM_PRIORITY
 
 
 def _build_watch_policy(args) -> dict:
@@ -475,6 +476,52 @@ def build_monitor_parser() -> argparse.ArgumentParser:
         help="Run a package-only quick scan instead of a full scan",
     )
 
+    refresh_parser = subparsers.add_parser(
+        "refresh-threat-data",
+        help="Run an immediate threat-intelligence update",
+    )
+    _add_workspace_root_args(refresh_parser)
+    refresh_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print refresh result as JSON",
+    )
+    refresh_parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Start the refresh in the background and return immediately",
+    )
+
+    local_threat_parser = subparsers.add_parser(
+        "local-threat",
+        help="Manage local malicious package names",
+    )
+    _add_workspace_root_args(local_threat_parser)
+    local_threat_subparsers = local_threat_parser.add_subparsers(
+        dest="local_threat_command",
+        required=True,
+    )
+    local_threat_add = local_threat_subparsers.add_parser("add", help="Add a local package name")
+    local_threat_add.add_argument("ecosystem", choices=ECOSYSTEM_PRIORITY)
+    local_threat_add.add_argument("name")
+    local_threat_add.add_argument("--reason", default="", help="Reason this package is locally blocked")
+    local_threat_add.add_argument(
+        "--version",
+        action="append",
+        dest="versions",
+        default=[],
+        help="Exact affected version; repeat for multiple versions",
+    )
+    local_threat_add.add_argument("--json", action="store_true", help="Print result as JSON")
+    local_threat_list = local_threat_subparsers.add_parser("list", help="List local package names")
+    local_threat_list.add_argument("--all", action="store_true", help="Include retired entries")
+    local_threat_list.add_argument("--ecosystem", choices=ECOSYSTEM_PRIORITY)
+    local_threat_list.add_argument("--json", action="store_true", help="Print result as JSON")
+    local_threat_remove = local_threat_subparsers.add_parser("remove", help="Remove a local package entry")
+    local_threat_remove.add_argument("id", type=int, help="Local package id from `local-threat list`")
+    local_threat_remove.add_argument("--reason", default="Removed by user")
+    local_threat_remove.add_argument("--json", action="store_true", help="Print result as JSON")
+
     cleanup_parser = subparsers.add_parser(
         "cleanup",
         help="Prune accumulated snapshot backups and orphaned staging directories",
@@ -725,6 +772,54 @@ def run_monitor_cli(argv: List[str]) -> int:
             return 1 if args.path else 0
         return max(result["exit_code"] for result in results)
 
+    if args.command == "refresh-threat-data":
+        if args.no_wait:
+            result = service.launch_threat_refresh_process()
+        else:
+            result = service.refresh_threat_data(force=True, reason="manual")
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(result.get("message", "Threat data refresh completed"))
+        return 0 if result.get("success") else 1
+
+    if args.command == "local-threat":
+        if args.local_threat_command == "add":
+            result = service.add_local_threat_package(
+                args.ecosystem,
+                args.name,
+                reason=args.reason,
+                versions=args.versions,
+            )
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                print(result["message"])
+            return 0
+
+        if args.local_threat_command == "list":
+            result = service.list_local_threat_packages(
+                active_only=not args.all,
+                ecosystem=args.ecosystem,
+            )
+            if args.json:
+                print(json.dumps(result, indent=2))
+            elif not result["packages"]:
+                print("No local threat packages.")
+            else:
+                for entry in result["packages"]:
+                    status = "active" if int(entry.get("active", 0) or 0) else "retired"
+                    print(f"{entry['id']}: {entry['ecosystem']} {entry['name']} [{status}]")
+            return 0
+
+        if args.local_threat_command == "remove":
+            result = service.retire_local_threat_package(args.id, reason=args.reason)
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                print(result["message"])
+            return 0
+
     if args.command == "cleanup":
         result = service.cleanup_storage(
             keep_backups=args.keep_backups,
@@ -755,6 +850,8 @@ def run_monitor_cli(argv: List[str]) -> int:
                 args.manifest,
                 public_key_path=args.public_key or service.config.get("snapshots", {}).get("public_key_path", ""),
             )
+            if result.get("success"):
+                result["local_threat_retirement"] = service.retire_local_threat_packages_now_in_ti()
             print(json.dumps(result, indent=2))
             return 0 if result.get("success") else 1
 

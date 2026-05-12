@@ -15,6 +15,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from contextlib import closing
 from datetime import datetime, timezone
@@ -37,6 +38,8 @@ from monitor.api import resolve_exact_version
 from monitor.api import supported_health_payload
 from monitor.api import SUPPORTED_CLIENT_TYPES
 from monitor.api import validate_client_request
+from monitor.bundled_local_threats import BUNDLED_LOCAL_THREAT_PACKAGES
+from monitor.bundled_local_threats import MINI_SHAI_HULUD_FEED_ID
 from monitor.config import allocate_api_port
 from monitor.config import ensure_monitor_api_token
 from monitor.config import ensure_monitor_layout
@@ -102,6 +105,85 @@ def _directory_size_bytes(path: str) -> int:
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _normalize_local_threat_version(value: object) -> str:
+    """Normalize exact package versions for local threat matching."""
+    version = str(value or "").strip()
+    while version and version[0] in "^~>=<! ":
+        version = version[1:].strip()
+    if version.startswith("v") and len(version) > 1 and version[1].isdigit():
+        version = version[1:]
+    return version
+
+
+def _local_threat_versions(entry: Dict[str, object]) -> List[str]:
+    """Return exact affected versions from a local threat entry."""
+    versions = entry.get("versions", [])
+    if isinstance(versions, list):
+        return [str(version).strip() for version in versions if str(version).strip()]
+    return []
+
+
+def _local_threat_entry_matches_version(
+    entry: Dict[str, object],
+    dependency_version: object,
+) -> bool:
+    """Return True when a local threat entry applies to a dependency version."""
+    affected_versions = _local_threat_versions(entry)
+    if not affected_versions:
+        return True
+    normalized_dependency = _normalize_local_threat_version(dependency_version)
+    if not normalized_dependency:
+        return True
+    normalized_affected = {
+        _normalize_local_threat_version(version)
+        for version in affected_versions
+    }
+    return normalized_dependency in normalized_affected
+
+
+class _FileLock:
+    """Small non-blocking advisory file lock."""
+
+    def __init__(self, path: str, description: str):
+        self.path = path
+        self.description = description
+        self.handle = None
+
+    def acquire(self) -> bool:
+        ensure_not_symlink(self.path, self.description)
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        handle = open(self.path, "a+", encoding="utf-8")
+        ensure_owner_only_permissions(self.path, OWNER_ONLY_FILE_MODE)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            handle.close()
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                return False
+            raise
+        self.handle = handle
+        self.handle.seek(0)
+        self.handle.truncate()
+        self.handle.write(f"pid={os.getpid()}\n")
+        self.handle.flush()
+        return True
+
+    def release(self) -> None:
+        if self.handle is None:
+            return
+        try:
+            self.handle.seek(0)
+            self.handle.truncate()
+            self.handle.flush()
+        except OSError:
+            pass
+        try:
+            fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+            self.handle = None
 
 
 def read_pid(pid_path: str) -> Optional[int]:
@@ -308,6 +390,7 @@ class MonitorService:
         self._last_menubar_ensure_monotonic = 0.0
         self.logger = logger
         self._configure_logging()
+        self._seed_bundled_local_threat_packages()
 
     def _migrate_legacy_instances_if_needed(self) -> None:
         """Import watched projects from legacy per-workspace monitor instances once."""
@@ -611,6 +694,148 @@ class MonitorService:
             ],
         }
 
+    def list_local_threat_packages(
+        self,
+        active_only: bool = True,
+        ecosystem: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """Return user-managed local malicious package names."""
+        entries = self.state.list_local_threat_packages(
+            active_only=active_only,
+            ecosystem=ecosystem,
+        )
+        return {
+            "count": len(entries),
+            "active_only": bool(active_only),
+            "ecosystem": ecosystem,
+            "packages": entries,
+        }
+
+    def add_local_threat_package(
+        self,
+        ecosystem: str,
+        name: str,
+        reason: str = "",
+        versions: Optional[List[str]] = None,
+        source: str = "user",
+        source_url: str = "",
+    ) -> Dict[str, object]:
+        """Add a user-managed local malicious package name."""
+        normalized_ecosystem = str(ecosystem or "").strip().lower()
+        if normalized_ecosystem not in ECOSYSTEM_PRIORITY:
+            raise ValueError(
+                "Unsupported ecosystem; expected one of: " + ", ".join(ECOSYSTEM_PRIORITY)
+            )
+        entry = self.state.add_local_threat_package(
+            normalized_ecosystem,
+            name,
+            reason=reason,
+            versions=versions,
+            source=source,
+            source_url=source_url,
+        )
+        already_exists = bool(entry.pop("already_exists", False))
+        return {
+            "success": True,
+            "already_exists": already_exists,
+            "package": entry,
+            "message": (
+                f"Local package already active: {normalized_ecosystem}/{entry.get('name')}"
+                if already_exists
+                else f"Added local package: {normalized_ecosystem}/{entry.get('name')}"
+            ),
+        }
+
+    def _seed_bundled_local_threat_packages(self) -> None:
+        """Persist bundled temporary threat intelligence once per feed version."""
+        seed_key = f"bundled_local_threat_seed:{MINI_SHAI_HULUD_FEED_ID}"
+        if self.state.get_agent_state(seed_key):
+            return
+
+        inserted = 0
+        skipped = 0
+        for package in BUNDLED_LOCAL_THREAT_PACKAGES:
+            ecosystem = str(package.get("ecosystem", "") or "").strip().lower()
+            name = str(package.get("name", "") or "").strip()
+            source = str(package.get("source", "") or MINI_SHAI_HULUD_FEED_ID).strip()
+            if not ecosystem or not name:
+                continue
+            historical = self.state.get_local_threat_package_history(
+                ecosystem,
+                name,
+                source=source,
+            )
+            if historical is not None:
+                skipped += 1
+                continue
+            result = self.state.add_local_threat_package(
+                ecosystem,
+                name,
+                reason=str(package.get("reason", "") or ""),
+                versions=list(package.get("versions", []) or []),
+                source=source,
+                source_url=str(package.get("source_url", "") or ""),
+            )
+            if result.get("already_exists"):
+                skipped += 1
+            else:
+                inserted += 1
+
+        self.state.set_agent_state(seed_key, _utcnow())
+        self.state.set_agent_state(f"{seed_key}:inserted", str(inserted))
+        self.state.set_agent_state(f"{seed_key}:skipped", str(skipped))
+
+    def retire_local_threat_package(
+        self,
+        package_id: int,
+        reason: str = "Removed by user",
+    ) -> Dict[str, object]:
+        """Retire one user-managed local malicious package name."""
+        entry = self.state.retire_local_threat_package(package_id, reason=reason)
+        if entry is None:
+            raise ValueError("Unknown local package id")
+        return {
+            "success": True,
+            "package": entry,
+            "message": f"Removed local package: {entry.get('ecosystem')}/{entry.get('name')}",
+        }
+
+    def retire_local_threat_packages_now_in_ti(self) -> Dict[str, object]:
+        """Auto-retire local package names that are now present in official TI."""
+        active_entries = self.state.list_local_threat_packages(active_only=True)
+        retire_ids: List[int] = []
+        for entry in active_entries:
+            ecosystem = str(entry.get("ecosystem", "") or "")
+            name = str(entry.get("name", "") or "")
+            if not ecosystem or not name:
+                continue
+            affected_versions = _local_threat_versions(entry)
+            if affected_versions:
+                version_checks = [
+                    bool(
+                        self.package_checker.check_packages(
+                            [{"name": name, "version": version}],
+                            ecosystem,
+                            include_shai_hulud=False,
+                        )
+                    )
+                    for version in affected_versions
+                ]
+                if version_checks and all(version_checks):
+                    retire_ids.append(int(entry["id"]))
+                continue
+            if self.package_checker.check_packages([{"name": name, "version": ""}], ecosystem, include_shai_hulud=False):
+                retire_ids.append(int(entry["id"]))
+        retired_count = self.state.retire_local_threat_packages(
+            retire_ids,
+            "Official threat intelligence now includes this package",
+        )
+        return {
+            "success": True,
+            "retired_count": retired_count,
+            "retired_ids": retire_ids,
+        }
+
     def add_watched_project(
         self,
         project_path: str,
@@ -774,6 +999,115 @@ class MonitorService:
             "bytes_freed": bytes_freed,
         }
 
+    def _refresh_lock_path(self) -> str:
+        return os.path.join(self.paths["snapshots"], "refresh.lock")
+
+    def _set_refresh_runtime_state(
+        self,
+        running: bool,
+        status: str = "",
+        message: str = "",
+        reason: str = "",
+    ) -> None:
+        self.state.set_agent_state("threat_refresh_running", "true" if running else "false")
+        if running:
+            self.state.set_agent_state("threat_refresh_started_at", _utcnow())
+            self.state.set_agent_state("threat_refresh_reason", reason)
+        else:
+            self.state.set_agent_state("threat_refresh_finished_at", _utcnow())
+        if status:
+            self.state.set_agent_state("threat_refresh_status", status)
+        if message:
+            self.state.set_agent_state("threat_refresh_message", message)
+
+    def refresh_threat_data(self, force: bool = True, reason: str = "manual") -> Dict[str, object]:
+        """Run a locked threat-intelligence refresh now."""
+        lock = _FileLock(self._refresh_lock_path(), "threat refresh lock")
+        if not lock.acquire():
+            if reason == "scheduled":
+                return {
+                    "success": True,
+                    "skipped": True,
+                    "already_running": True,
+                    "message": "Threat data refresh is already running",
+                }
+            return {
+                "success": False,
+                "already_running": True,
+                "message": "Threat data refresh is already running",
+            }
+        self._set_refresh_runtime_state(True, status="running", reason=reason)
+        try:
+            result = self.updater.refresh_if_due(force=force)
+            if result.get("success") and not result.get("skipped"):
+                retire_result = self.retire_local_threat_packages_now_in_ti()
+                result["local_threat_packages_retired"] = retire_result["retired_count"]
+            status = "success" if result.get("success") else "failed"
+            self._set_refresh_runtime_state(
+                False,
+                status=status,
+                message=str(result.get("message", "")),
+                reason=reason,
+            )
+            return result
+        except Exception as exc:
+            self._set_refresh_runtime_state(
+                False,
+                status="failed",
+                message=str(exc),
+                reason=reason,
+            )
+            raise
+        finally:
+            lock.release()
+
+    def refresh_threat_data_async(self, force: bool = True, reason: str = "manual") -> Dict[str, object]:
+        """Start a threat-intelligence refresh in this monitor process."""
+        def runner() -> None:
+            try:
+                self.refresh_threat_data(force=force, reason=reason)
+            except Exception:
+                self.logger.exception("Threat data refresh failed")
+
+        thread = threading.Thread(
+            target=runner,
+            name="orewatch-threat-refresh",
+            daemon=True,
+        )
+        thread.start()
+        return {
+            "success": True,
+            "started": True,
+            "message": "Threat data refresh started",
+        }
+
+    def launch_threat_refresh_process(self) -> Dict[str, object]:
+        """Launch a detached one-shot refresh process for CLI --no-wait."""
+        command = [
+            sys.executable,
+            "-m",
+            "malicious_package_scanner",
+            "monitor",
+            "refresh-threat-data",
+            "--workspace-root",
+            self.requested_workspace_root,
+        ]
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+            cwd=os.getcwd(),
+            env=os.environ.copy(),
+        )
+        return {
+            "success": True,
+            "pid": process.pid,
+            "message": f"Threat data refresh started in background (pid: {process.pid})",
+        }
+
     def _dependency_data_health(self, ecosystem: str) -> Dict[str, object]:
         """Return threat-data health for one ecosystem."""
         return self._threat_data_summary([ecosystem])["summary"]
@@ -872,6 +1206,31 @@ class MonitorService:
             raise ValueError(f"Unable to parse manifest_path '{manifest_path}': {exc}") from exc
         return [self._normalize_manifest_dependency(item) for item in parsed_dependencies]
 
+    def _local_threat_matches_by_name(
+        self,
+        dependencies: List[Dict[str, object]],
+        ecosystem: str,
+    ) -> Dict[str, Dict[str, object]]:
+        """Return active local threat entries keyed by dependency name."""
+        local_entries: Dict[str, List[Dict[str, object]]] = {}
+        for entry in self.state.list_local_threat_packages(active_only=True, ecosystem=ecosystem):
+            key = str(entry.get("name_normalized") or entry.get("name", "")).lower().strip()
+            local_entries.setdefault(key, []).append(entry)
+        matches: Dict[str, Dict[str, object]] = {}
+        for dependency in dependencies:
+            name = str(dependency.get("name", "") or "").strip()
+            dependency_version = (
+                dependency.get("exact_version")
+                or dependency.get("resolved_version")
+                or dependency.get("requested_spec")
+                or ""
+            )
+            for entry in local_entries.get(name.lower(), []):
+                if _local_threat_entry_matches_version(entry, dependency_version):
+                    matches[name.lower()] = entry
+                    break
+        return matches
+
     def _evaluate_dependencies(
         self,
         dependencies: List[Dict[str, object]],
@@ -896,12 +1255,17 @@ class MonitorService:
         matches_by_name: Dict[str, List[Dict[str, object]]] = {}
         for match in malicious_matches:
             matches_by_name.setdefault(str(match.get("name", "")).lower(), []).append(match)
+        local_matches_by_name = self._local_threat_matches_by_name(
+            normalized_dependencies,
+            ecosystem,
+        )
 
         results: List[Dict[str, object]] = []
         has_malicious = False
         unresolved_count = 0
         for dependency in normalized_dependencies:
             dependency_matches = matches_by_name.get(dependency["name"].lower(), [])
+            local_match = local_matches_by_name.get(dependency["name"].lower())
             if dependency_matches:
                 match = dependency_matches[0]
                 has_malicious = True
@@ -923,6 +1287,30 @@ class MonitorService:
                             f"Do not install {dependency['name']}. "
                             f"If already installed, run: {uninstall_cmd}"
                         ),
+                    }
+                )
+                continue
+
+            if local_match is not None:
+                has_malicious = True
+                safe_name = shlex.quote(dependency["name"])
+                uninstall_cmd = UNINSTALL_COMMANDS.get(ecosystem, "").format(name=safe_name)
+                results.append(
+                    {
+                        "name": dependency["name"],
+                        "requested_spec": dependency["requested_spec"],
+                        "resolved_version": dependency["resolved_version"],
+                        "status": "malicious_match",
+                        "severity": "critical",
+                        "sources": ["local"],
+                        "reason": str(local_match.get("reason", "Added locally by user")),
+                        "affected_versions": _local_threat_versions(local_match),
+                        "source_url": str(local_match.get("source_url", "") or ""),
+                        "user_action_required": (
+                            f"Do not install {dependency['name']}. "
+                            f"If already installed, run: {uninstall_cmd}"
+                        ),
+                        "local_threat_package_id": local_match.get("id"),
                     }
                 )
                 continue
@@ -1013,6 +1401,9 @@ class MonitorService:
             "base_url": self._api_base_url(),
             "last_threat_refresh_at": status.get("last_threat_refresh_at"),
             "last_threat_refresh_status": status.get("last_threat_refresh_status"),
+            "threat_refresh_running": status.get("threat_refresh_running"),
+            "threat_refresh_status": status.get("threat_refresh_status"),
+            "threat_refresh_message": status.get("threat_refresh_message"),
             "last_live_promotion_status": status.get("last_live_promotion_status"),
             "last_live_promotion_decision": status.get("last_live_promotion_decision"),
             "current_snapshot_version": status.get("current_snapshot_version"),
@@ -1664,6 +2055,12 @@ class MonitorService:
             "last_threat_refresh_at": self.state.get_agent_state("last_threat_refresh_at"),
             "last_threat_refresh_status": self.state.get_agent_state("last_threat_refresh_status"),
             "last_threat_refresh_message": self.state.get_agent_state("last_threat_refresh_message"),
+            "threat_refresh_running": self.state.get_agent_state("threat_refresh_running") == "true",
+            "threat_refresh_started_at": self.state.get_agent_state("threat_refresh_started_at"),
+            "threat_refresh_finished_at": self.state.get_agent_state("threat_refresh_finished_at"),
+            "threat_refresh_status": self.state.get_agent_state("threat_refresh_status"),
+            "threat_refresh_message": self.state.get_agent_state("threat_refresh_message"),
+            "threat_refresh_reason": self.state.get_agent_state("threat_refresh_reason"),
             "last_live_promotion_at": last_live_promotion_at,
             "last_live_promotion_status": last_live_promotion_status,
             "last_live_promotion_decision": self.state.get_agent_state("last_live_promotion_decision"),
@@ -1979,7 +2376,7 @@ class MonitorService:
         """Run one service loop iteration."""
         self.state.set_agent_state("last_heartbeat_at", _utcnow())
         self._ensure_menubar_running_if_configured()
-        refresh_result = self.updater.refresh_if_due(force=False)
+        refresh_result = self.refresh_threat_data(force=False, reason="scheduled")
         if refresh_result.get("used_live_collection") and not refresh_result.get("skipped"):
             logger.info(
                 "Threat data live refresh decision=%s success=%s kept_last_known_good=%s message=%s",
@@ -2088,6 +2485,7 @@ class MonitorService:
             include_experimental_sources=bool(policy.get("include_experimental_sources", False)),
             ensure_data=False,
             print_summary=False,
+            local_threat_packages=self.state.list_local_threat_packages(active_only=True),
         )
         result = run_scan(request)
         display_report_path = result.report_path

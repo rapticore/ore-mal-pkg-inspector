@@ -167,10 +167,239 @@ class MonitorState:
                     expires_at TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS local_threat_packages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ecosystem TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    name_normalized TEXT NOT NULL,
+                    versions_json TEXT NOT NULL DEFAULT '[]',
+                    reason TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'user',
+                    source_url TEXT NOT NULL DEFAULT '',
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    retired_at TEXT,
+                    retired_reason TEXT
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_local_threat_packages_active
+                ON local_threat_packages(ecosystem, name_normalized)
+                WHERE active = 1;
                 """
             )
             self._migrate_findings_primary_key(conn)
+            self._migrate_local_threat_packages(conn)
         self._secure_state_db()
+
+    def _migrate_local_threat_packages(self, conn: sqlite3.Connection) -> None:
+        """Add local-threat columns introduced after the initial table."""
+        rows = conn.execute("PRAGMA table_info(local_threat_packages)").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        if "versions_json" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE local_threat_packages "
+                "ADD COLUMN versions_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "source" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE local_threat_packages "
+                "ADD COLUMN source TEXT NOT NULL DEFAULT 'user'"
+            )
+        if "source_url" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE local_threat_packages "
+                "ADD COLUMN source_url TEXT NOT NULL DEFAULT ''"
+            )
+
+    def _serialize_versions(self, versions: Optional[List[str]]) -> str:
+        """Return stable JSON for an optional exact-version list."""
+        clean_versions = sorted(
+            {
+                str(version or "").strip()
+                for version in (versions or [])
+                if str(version or "").strip()
+            }
+        )
+        return json.dumps(clean_versions)
+
+    def _deserialize_local_threat_row(self, row: sqlite3.Row) -> Dict:
+        """Return one local-threat row with parsed versions."""
+        entry = dict(row)
+        try:
+            versions = json.loads(entry.get("versions_json", "[]") or "[]")
+        except json.JSONDecodeError:
+            versions = []
+        entry["versions"] = [str(version) for version in versions if str(version)]
+        return entry
+
+    def add_local_threat_package(
+        self,
+        ecosystem: str,
+        name: str,
+        reason: str = "",
+        versions: Optional[List[str]] = None,
+        source: str = "user",
+        source_url: str = "",
+    ) -> Dict:
+        """Add or reactivate a user-managed malicious package name."""
+        normalized_ecosystem = str(ecosystem or "").strip().lower()
+        package_name = str(name or "").strip()
+        if not normalized_ecosystem:
+            raise ValueError("ecosystem is required")
+        if not package_name:
+            raise ValueError("package name is required")
+        name_normalized = package_name.lower()
+        now = utcnow()
+        reason = str(reason or "").strip() or "Added locally by user"
+        versions_json = self._serialize_versions(versions)
+        source = str(source or "user").strip() or "user"
+        source_url = str(source_url or "").strip()
+        with self._connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT * FROM local_threat_packages
+                WHERE ecosystem = ? AND name_normalized = ? AND active = 1
+                """,
+                (normalized_ecosystem, name_normalized),
+            ).fetchone()
+            if existing is not None:
+                row = self._deserialize_local_threat_row(existing)
+                if source == "user":
+                    conn.execute(
+                        """
+                        UPDATE local_threat_packages
+                        SET versions_json = ?, reason = ?, source = 'user', source_url = ''
+                        WHERE id = ?
+                        """,
+                        (versions_json, reason, int(row["id"])),
+                    )
+                    updated = conn.execute(
+                        "SELECT * FROM local_threat_packages WHERE id = ?",
+                        (int(row["id"]),),
+                    ).fetchone()
+                    row = self._deserialize_local_threat_row(updated)
+                row["already_exists"] = True
+                return row
+
+            conn.execute(
+                """
+                INSERT INTO local_threat_packages (
+                    ecosystem, name, name_normalized, versions_json, reason,
+                    source, source_url, active, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                """,
+                (
+                    normalized_ecosystem,
+                    package_name,
+                    name_normalized,
+                    versions_json,
+                    reason,
+                    source,
+                    source_url,
+                    now,
+                ),
+            )
+            package_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            row = conn.execute(
+                "SELECT * FROM local_threat_packages WHERE id = ?",
+                (package_id,),
+            ).fetchone()
+        result = self._deserialize_local_threat_row(row) if row is not None else {}
+        result["already_exists"] = False
+        return result
+
+    def get_local_threat_package_history(
+        self,
+        ecosystem: str,
+        name: str,
+        source: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Return the newest local-threat row for a package, including retired rows."""
+        query = """
+            SELECT * FROM local_threat_packages
+            WHERE ecosystem = ? AND name_normalized = ?
+        """
+        params: List[object] = [
+            str(ecosystem or "").strip().lower(),
+            str(name or "").strip().lower(),
+        ]
+        if source is not None:
+            query += " AND source = ?"
+            params.append(str(source or "").strip())
+        query += " ORDER BY active DESC, id DESC LIMIT 1"
+        with self._connect() as conn:
+            row = conn.execute(query, tuple(params)).fetchone()
+        return self._deserialize_local_threat_row(row) if row is not None else None
+
+    def list_local_threat_packages(
+        self,
+        active_only: bool = True,
+        ecosystem: Optional[str] = None,
+    ) -> List[Dict]:
+        """Return user-managed local malicious package names."""
+        query = "SELECT * FROM local_threat_packages"
+        clauses: List[str] = []
+        params: List[object] = []
+        if active_only:
+            clauses.append("active = 1")
+        if ecosystem:
+            clauses.append("ecosystem = ?")
+            params.append(str(ecosystem).strip().lower())
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY ecosystem ASC, name_normalized ASC, id ASC"
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._deserialize_local_threat_row(row) for row in rows]
+
+    def retire_local_threat_package(
+        self,
+        package_id: int,
+        reason: str = "Removed by user",
+    ) -> Optional[Dict]:
+        """Retire one local malicious package entry."""
+        now = utcnow()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM local_threat_packages WHERE id = ?",
+                (int(package_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                """
+                UPDATE local_threat_packages
+                SET active = 0, retired_at = ?, retired_reason = ?
+                WHERE id = ?
+                """,
+                (now, str(reason or "Removed by user"), int(package_id)),
+            )
+            updated = conn.execute(
+                "SELECT * FROM local_threat_packages WHERE id = ?",
+                (int(package_id),),
+            ).fetchone()
+        return self._deserialize_local_threat_row(updated) if updated is not None else None
+
+    def retire_local_threat_packages(
+        self,
+        package_ids: List[int],
+        reason: str,
+    ) -> int:
+        """Retire multiple local malicious package entries."""
+        if not package_ids:
+            return 0
+        now = utcnow()
+        with self._connect() as conn:
+            cursor = conn.executemany(
+                """
+                UPDATE local_threat_packages
+                SET active = 0, retired_at = ?, retired_reason = ?
+                WHERE id = ? AND active = 1
+                """,
+                [(now, str(reason or "Retired"), int(package_id)) for package_id in package_ids],
+            )
+        return int(cursor.rowcount or 0)
 
     def _findings_primary_key_columns(self, conn: sqlite3.Connection) -> List[str]:
         """Return the ordered PRIMARY KEY columns for the findings table."""
