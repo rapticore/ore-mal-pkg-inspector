@@ -75,6 +75,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "webhook_timeout_ms": 5000,
         "webhook_headers": {},
     },
+    "package_updates": {
+        "enabled": True,
+        "interval_seconds": 24 * 60 * 60,
+        "registry_timeout_ms": 5000,
+        "include_self": True,
+    },
     "policy": {
         "allow_project_file": False,
         "allow_project_suppressions": False,

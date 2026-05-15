@@ -149,12 +149,17 @@ python3.14 -m pip install 'orewatch[mac-menubar]'
 
 # existing pipx install
 pipx inject orewatch pyobjc-framework-Cocoa
+
+# Homebrew install
+brew install rapticore/tap/orewatch
 orewatch monitor menubar
 ```
 
-If you installed OreWatch with Homebrew and want the menu bar app, reinstall it
-with `pipx` or `pip` using `orewatch[mac-menubar]` so the Cocoa bindings live
-in the same environment as `orewatch`.
+Homebrew installs the Cocoa bindings into OreWatch's isolated `libexec`
+environment. If an older install reports `No module named 'AppKit'`, run
+`brew update && brew reinstall rapticore/tap/orewatch`. For pip, pipx, and
+source installs, the optional bindings still need to be added to the same
+Python environment that provides `orewatch`.
 
 What you get:
 

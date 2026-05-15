@@ -212,6 +212,9 @@ pipx install --python python3.14 orewatch
 
 # Verify
 orewatch --help
+
+# Optional macOS menu bar app
+orewatch monitor menubar
 ```
 
 If you already installed `orewatch` with pipx and want to add the macOS menu
@@ -246,6 +249,9 @@ brew install rapticore/tap/orewatch
 
 # Verify
 orewatch --help
+
+# Optional macOS menu bar app
+orewatch monitor menubar
 ```
 
 **Upgrade:**
@@ -261,10 +267,11 @@ brew uninstall orewatch
 brew untap rapticore/tap   # optional — removes the tap
 ```
 
-> **Note:** The Homebrew formula tracks the published PyPI release. If you also
-> want the macOS menu bar app, install OreWatch with `pipx` or `pip` using
-> `orewatch[mac-menubar]` instead. The optional Cocoa bindings must live in the
-> same Python environment as the `orewatch` command.
+> **Note:** The Homebrew formula includes the Cocoa bindings required by
+> `orewatch monitor menubar`. If an older Homebrew install reports
+> `ModuleNotFoundError: No module named 'AppKit'`, run
+> `brew update && brew reinstall rapticore/tap/orewatch` so the formula rebuilds
+> its isolated Python environment with menu bar support.
 
 #### Option 3 — pip
 
@@ -276,7 +283,7 @@ virtualenvs:
 python3.14 -m pip install orewatch
 
 # Pin a version for reproducible CI builds
-python3.14 -m pip install orewatch==1.2.5
+python3.14 -m pip install orewatch==1.3.0
 
 # If you want the macOS menu bar app on a fresh install, use this instead:
 # python3.14 -m pip install 'orewatch[mac-menubar]'
@@ -741,6 +748,8 @@ orewatch monitor findings
 orewatch monitor findings --project /path/to/project --min-severity high
 orewatch monitor notifications
 orewatch monitor notifications --project /path/to/project
+orewatch monitor package-updates
+orewatch monitor package-updates --check
 ```
 
 The local API and MCP bridge expose the same data for IDEs and agents:
@@ -748,11 +757,19 @@ The local API and MCP bridge expose the same data for IDEs and agents:
 - API:
   - `GET /v1/findings/active`
   - `GET /v1/notifications`
+  - `GET /v1/package-updates`
+  - `POST /v1/package-updates/check`
 - MCP:
   - `orewatch_list_active_findings`
   - `orewatch_list_notifications`
+  - `orewatch_list_package_updates`
+  - `orewatch_check_package_updates`
 
 This is the supported path for IDEs, MCP clients, and coding agents to surface background detections after the original scan has finished.
+
+Package update advisories are notify-only. OreWatch reports newer versions for
+watched project dependencies and OreWatch itself, but it does not modify
+manifests, lockfiles, or installed packages.
 
 #### Native macOS Menu Bar App
 
@@ -767,6 +784,9 @@ python3.14 -m pip install 'orewatch[mac-menubar]'
 
 # existing pipx install
 pipx inject orewatch pyobjc-framework-Cocoa
+
+# Homebrew install
+brew install rapticore/tap/orewatch
 ```
 
 Then launch the menu bar app:
@@ -779,9 +799,11 @@ By default, `monitor menubar` relaunches the app in the background and returns y
 
 The menu bar app attaches to the same singleton monitor. It does not start a second monitor instance. If the monitor is not already installed and running, the app will install/start it on first launch.
 
-If you installed OreWatch with Homebrew and want the menu bar app, reinstall
-OreWatch with `pipx` or `pip` using the `mac-menubar` extra. Installing the
-extra into a separate Python environment will not enable `orewatch monitor menubar`.
+Homebrew installs the Cocoa bindings into OreWatch's isolated `libexec`
+environment. If `orewatch monitor menubar` reports `No module named 'AppKit'`,
+refresh the formula with `brew update && brew reinstall rapticore/tap/orewatch`.
+For pip, pipx, and source installs, the optional bindings still need to be added
+to the same Python environment that provides the `orewatch` command.
 
 When desktop notifications are enabled on macOS, the singleton watcher now keeps one singleton menu bar app alive and uses it as the primary popup surface. That avoids relying only on a detached `osascript` invocation from the daemon and gives you a persistent native UI for new findings.
 
@@ -792,13 +814,14 @@ What the macOS menu bar app gives you:
 - a persistent menu bar status item that prefers the bundled branded icon, with compact text fallback or alert badges when needed
 - a compact red/bold alert state for newly detected alerts that stays visible until you open the menu
 - a live summary of active findings and highest severity
+- a first-class Package Updates section with project dependency updates, OreWatch self-update state, last check status, and copyable suggested commands
 - recent notifications in a native dropdown menu
 - native Notification Center popups for newly stored monitor alerts
 - an `Add Workspace Folder...` action that enrolls a project into the singleton watcher and runs an initial quick scan
 - built-in configuration toggles for desktop notifications, terminal notifications, menu bar keepalive, and menu-bar-driven popups
 - one-click actions to open reports, monitor home, and the monitor log
 - one-click actions to open the monitor config file and config folder
-- menu actions to refresh, run quick/full scans, and start/restart/stop the singleton monitor
+- menu actions to check package updates, refresh threat intelligence, run quick/full scans, and start/restart/stop the singleton monitor
 
 Recommended Mac flow:
 
@@ -891,7 +914,7 @@ orewatch monitor snapshot publish /tmp/ore-snapshots \
 - `monitor connection-info` prints the loopback API base URL, token path, singleton monitor scope/home, and whether the daemon is already running.
 - `monitor ide-bootstrap` prints the current MCP/API bootstrap snippets again without reinstalling anything.
 - `monitor mcp` runs a local MCP bridge that exposes OreWatch dependency checks to Claude Code, Codex, and Cursor.
-- `monitor findings` and `monitor notifications` provide the built-in review surface for background detections.
+- `monitor findings`, `monitor notifications`, and `monitor package-updates` provide the built-in review surface for background detections and update advisories.
 - `monitor menubar` launches a native macOS menu bar app backed by the singleton monitor and findings store.
 - `monitor mcp` is a stdio server, so it will wait for an MCP client after startup. It now writes readiness and auto-start status to stderr, not stdout.
 - For IDE or MCP-client startup, use `monitor install` so the background daemon is already available when the client launches `monitor mcp` or calls the API.
@@ -906,8 +929,8 @@ orewatch monitor snapshot publish /tmp/ore-snapshots \
 - The API uses a per-user bearer token stored in the monitor config directory at `api.token` with owner-only permissions.
 - Direct requests to `127.0.0.1:48736` without `Authorization: Bearer <token>` will correctly return `401 Unauthorized`.
 - Agent and IDE clients should discover the monitor via `orewatch monitor connection-info` rather than guessing paths, and should send the actual `project_path` they are operating on inside dependency-check requests.
-- Claude Code, Codex, and Cursor can use the bundled MCP bridge, which exposes `orewatch_health`, `orewatch_check_dependency_add`, `orewatch_check_manifest`, `orewatch_override_dependency_add`, `orewatch_list_active_findings`, and `orewatch_list_notifications`.
-- VS Code, JetBrains / PyCharm, and Xcode integrations should call the same localhost API for dependency-add checks, manifest rechecks, active findings, and recent notifications.
+- Claude Code, Codex, and Cursor can use the bundled MCP bridge, which exposes `orewatch_health`, `orewatch_check_dependency_add`, `orewatch_check_manifest`, `orewatch_override_dependency_add`, `orewatch_list_active_findings`, `orewatch_list_notifications`, `orewatch_list_package_updates`, and `orewatch_check_package_updates`.
+- VS Code, JetBrains / PyCharm, and Xcode integrations should call the same localhost API for dependency-add checks, manifest rechecks, active findings, recent notifications, and package update advisories.
 - The exact request and response shapes are documented in [docs/local-api.md](docs/local-api.md).
 
 **Optional anomaly-gated live-update config:**

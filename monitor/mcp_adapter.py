@@ -154,6 +154,32 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "orewatch_list_package_updates",
+        "description": "List package update advisories detected by OreWatch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_path": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1},
+                "active_only": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "orewatch_check_package_updates",
+        "description": "Start or run an OreWatch package update advisory check.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_path": {"type": "string"},
+                "wait": {"type": "boolean"},
+                "force": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -318,6 +344,17 @@ class MCPBridge:
             "monitor_message": "OreWatch monitor API is unavailable",
         }
 
+    def _offline_package_updates(self) -> Dict[str, Any]:
+        return {
+            "project_path": None,
+            "count": 0,
+            "returned": 0,
+            "limit": 20,
+            "active_only": True,
+            "updates": [],
+            "monitor_message": "OreWatch monitor API is unavailable",
+        }
+
     def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Dispatch one MCP tool call."""
         if name == "orewatch_health":
@@ -407,6 +444,50 @@ class MCPBridge:
             if query:
                 path += "?" + urllib.parse.urlencode(query)
             return monitor_api_request(self.base_url, self.token, "GET", path)
+
+        if name == "orewatch_list_package_updates":
+            if not self.ensure_api_ready()["ready"]:
+                return self._offline_package_updates()
+            query = {}
+            if arguments.get("project_path"):
+                pp = str(arguments["project_path"])
+                if "\x00" in pp:
+                    raise ValueError("Invalid project_path: null bytes not allowed")
+                pp = os.path.abspath(pp)
+                if not os.path.isdir(pp):
+                    raise ValueError(f"project_path is not a valid directory: {pp}")
+                query["project_path"] = pp
+            if arguments.get("limit"):
+                query["limit"] = int(arguments["limit"])
+            if "active_only" in arguments:
+                query["active_only"] = "true" if bool(arguments["active_only"]) else "false"
+            path = "/v1/package-updates"
+            if query:
+                path += "?" + urllib.parse.urlencode(query)
+            return monitor_api_request(self.base_url, self.token, "GET", path)
+
+        if name == "orewatch_check_package_updates":
+            if not self.ensure_api_ready()["ready"]:
+                return {
+                    "success": False,
+                    "monitor_message": "OreWatch monitor API is unavailable",
+                }
+            payload = dict(arguments)
+            if payload.get("project_path"):
+                pp = str(payload["project_path"])
+                if "\x00" in pp:
+                    raise ValueError("Invalid project_path: null bytes not allowed")
+                pp = os.path.abspath(pp)
+                if not os.path.isdir(pp):
+                    raise ValueError(f"project_path is not a valid directory: {pp}")
+                payload["project_path"] = pp
+            return monitor_api_request(
+                self.base_url,
+                self.token,
+                "POST",
+                "/v1/package-updates/check",
+                payload=payload,
+            )
 
         raise ValueError(f"Unknown tool: {name}")
 

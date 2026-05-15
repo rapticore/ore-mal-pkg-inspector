@@ -441,6 +441,16 @@ class _MonitorAPIHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
+            if route == "/v1/package-updates":
+                self._write_json(
+                    200,
+                    self.server.service.list_package_updates(
+                        project_path=self._query_value(query, "project_path"),
+                        limit=self._query_limit(query, default=20),
+                        active_only=self._query_bool(query, "active_only", default=True),
+                    ),
+                )
+                return
             if route == "/v1/local-threat/packages":
                 ecosystem = self._query_value(query, "ecosystem")
                 ecosystem = ecosystem.lower() if ecosystem is not None else None
@@ -485,6 +495,30 @@ class _MonitorAPIHandler(BaseHTTPRequestHandler):
                     result = self.server.service.refresh_threat_data(force=force, reason="api")
                 else:
                     result = self.server.service.refresh_threat_data_async(force=force, reason="api")
+                self._write_json(200 if result.get("success") else 409, result)
+                return
+            if route == "/v1/package-updates/check":
+                wait = bool(payload.get("wait", False))
+                force = bool(payload.get("force", True))
+                project_path = str(payload.get("project_path", "") or "").strip() or None
+                if project_path is not None:
+                    if not os.path.isabs(project_path):
+                        raise ValueError("project_path must be an absolute path")
+                    project_path = os.path.realpath(project_path)
+                    if not os.path.isdir(project_path):
+                        raise ValueError("project_path must be an existing directory")
+                if wait:
+                    result = self.server.service.check_package_updates(
+                        project_path=project_path,
+                        force=force,
+                        reason="api",
+                    )
+                else:
+                    result = self.server.service.check_package_updates_async(
+                        project_path=project_path,
+                        force=force,
+                        reason="api",
+                    )
                 self._write_json(200 if result.get("success") else 409, result)
                 return
             if route == "/v1/local-threat/packages":

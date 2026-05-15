@@ -161,6 +161,49 @@ class Notifier:
 
         self._emit(project_path, "dependency_blocked", message, details=details)
 
+    def notify_package_updates(
+        self,
+        project_path: str,
+        changes: Dict[str, list[Dict]],
+    ) -> None:
+        """Emit notifications for newly available or changed package updates."""
+        changed = list(changes.get("new_advisories", [])) + list(
+            changes.get("updated_advisories", [])
+        )
+        if not changed:
+            return
+
+        project_name = os.path.basename(project_path) or project_path
+        if len(changed) == 1:
+            advisory = changed[0]
+            if advisory.get("ecosystem") == "orewatch":
+                message = (
+                    f"OreWatch update available: "
+                    f"{advisory.get('current_version')} -> {advisory.get('latest_version')}"
+                )
+            else:
+                message = (
+                    f"Package update available in {project_name}: "
+                    f"{advisory.get('package_name')} "
+                    f"{advisory.get('current_version')} -> {advisory.get('latest_version')}"
+                )
+        else:
+            highlights = ", ".join(
+                f"{advisory.get('package_name')}@{advisory.get('latest_version')}"
+                for advisory in changed[:2]
+            )
+            if len(changed) > 2:
+                highlights += f", +{len(changed) - 2} more"
+            message = f"{len(changed)} package update(s) available in {project_name}: {highlights}"
+
+        details = {
+            "project_path": project_path,
+            "project_name": project_name,
+            "package_updates": changed,
+            "resolved_package_updates": list(changes.get("resolved_advisories", [])),
+        }
+        self._emit(project_path, "package_update_available", message, details=details)
+
     def _finding_brief(self, finding: Dict) -> str:
         severity = str(finding.get("severity", "unknown")).upper()
         title = str(finding.get("title", "OreWatch finding")).strip()
@@ -230,7 +273,13 @@ class Notifier:
 
     def _emit(self, project_path: str, kind: str, message: str, details: Dict | None = None) -> None:
         """Emit a notification through the configured channels."""
-        self.state.add_notification(project_path, kind, message)
+        notification_details = details or {}
+        self.state.add_notification(
+            project_path,
+            kind,
+            message,
+            details=notification_details,
+        )
 
         if self.config.get("notifications", {}).get("terminal", True):
             logger.warning("MONITOR: %s", message)
@@ -238,7 +287,7 @@ class Notifier:
         if self.config.get("notifications", {}).get("desktop", True):
             self._emit_desktop("OreWatch", message)
 
-        self._emit_webhook(kind, message, details or {})
+        self._emit_webhook(kind, message, notification_details)
 
     def _emit_webhook(self, kind: str, message: str, details: Dict) -> None:
         """Send a webhook notification when configured."""

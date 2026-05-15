@@ -198,6 +198,29 @@ def _render_notifications_text(payload: Dict[str, object]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _render_package_updates_text(payload: Dict[str, object]) -> str:
+    updates = payload.get("updates", [])
+    if not updates:
+        return "No package updates available.\n"
+
+    lines = [f"Package updates: {payload.get('count', len(updates))}"]
+    if payload.get("project_path"):
+        lines.append(f"Project: {payload['project_path']}")
+    lines.append("")
+    for update in updates:
+        lines.append(
+            f"{update['ecosystem']} {update['package_name']} "
+            f"{update['current_version']} -> {update['latest_version']}"
+        )
+        manifest_path = str(update.get("manifest_path", "") or "").strip()
+        if manifest_path:
+            lines.append(f"  manifest: {manifest_path}")
+        update_command = str(update.get("update_command", "") or "").strip()
+        if update_command:
+            lines.append(f"  command: {update_command}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _path_is_within(base: str, candidate: str) -> bool:
     return candidate == base or candidate.startswith(base + os.sep)
 
@@ -416,6 +439,33 @@ def build_monitor_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print notifications as JSON",
+    )
+    package_updates_parser = subparsers.add_parser(
+        "package-updates",
+        help="List package update advisories",
+    )
+    _add_workspace_root_args(package_updates_parser)
+    package_updates_parser.add_argument("--project", help="Filter updates to one project path")
+    package_updates_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Maximum package updates to return (default: 20)",
+    )
+    package_updates_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Include resolved package update advisories",
+    )
+    package_updates_parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Run a package update check before listing advisories",
+    )
+    package_updates_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print package updates as JSON",
     )
     log_parser = subparsers.add_parser("log", help="Show recent monitor log lines")
     _add_workspace_root_args(log_parser)
@@ -730,6 +780,31 @@ def run_monitor_cli(argv: List[str]) -> int:
             print(json.dumps(notifications, indent=2))
         else:
             print(_render_notifications_text(notifications), end="")
+        return 0
+
+    if args.command == "package-updates":
+        check_result = None
+        if args.check:
+            check_result = service.check_package_updates(
+                project_path=args.project,
+                force=True,
+                reason="manual",
+            )
+        updates = service.list_package_updates(
+            project_path=args.project,
+            limit=args.limit,
+            active_only=not args.all,
+        )
+        if check_result is not None:
+            updates["check"] = check_result
+        if args.json:
+            print(json.dumps(updates, indent=2))
+        else:
+            if check_result is not None:
+                print(check_result.get("message", "Package update check completed"))
+            print(_render_package_updates_text(updates), end="")
+        if check_result is not None and not check_result.get("success", True):
+            return 1
         return 0
 
     if args.command == "log":

@@ -51,6 +51,8 @@ from monitor.mcp_adapter import _read_message
 from monitor.mcp_adapter import _write_message
 from monitor.mcp_adapter import run_mcp_adapter
 from monitor import notifier as monitor_notifier
+from monitor.package_updates import _self_update_command
+from monitor.package_updates import advisory_fingerprint
 from monitor import policy as monitor_policy
 from monitor.service import MonitorService
 from monitor.service import render_launchd_plist
@@ -311,8 +313,8 @@ class MonitorTests(unittest.TestCase):
             def __init__(self):
                 self.notifications = []
 
-            def add_notification(self, project_path, kind, message, finding_fingerprint=None):
-                self.notifications.append((project_path, kind, message, finding_fingerprint))
+            def add_notification(self, project_path, kind, message, finding_fingerprint=None, details=None):
+                self.notifications.append((project_path, kind, message, finding_fingerprint, details))
 
         state = DummyState()
         notifier = monitor_notifier.Notifier(
@@ -342,8 +344,8 @@ class MonitorTests(unittest.TestCase):
             def __init__(self):
                 self.notifications = []
 
-            def add_notification(self, project_path, kind, message, finding_fingerprint=None):
-                self.notifications.append((project_path, kind, message, finding_fingerprint))
+            def add_notification(self, project_path, kind, message, finding_fingerprint=None, details=None):
+                self.notifications.append((project_path, kind, message, finding_fingerprint, details))
 
         with tempfile.TemporaryDirectory() as state_root:
             menubar_pid = os.path.join(state_root, "menubar.pid")
@@ -367,8 +369,8 @@ class MonitorTests(unittest.TestCase):
             def __init__(self):
                 self.notifications = []
 
-            def add_notification(self, project_path, kind, message, finding_fingerprint=None):
-                self.notifications.append((project_path, kind, message, finding_fingerprint))
+            def add_notification(self, project_path, kind, message, finding_fingerprint=None, details=None):
+                self.notifications.append((project_path, kind, message, finding_fingerprint, details))
 
         state = DummyState()
         notifier = monitor_notifier.Notifier(
@@ -395,16 +397,17 @@ class MonitorTests(unittest.TestCase):
         )
 
         self.assertEqual(len(state.notifications), 1)
-        _project_path, kind, message, _fingerprint = state.notifications[0]
+        _project_path, kind, message, _fingerprint, details = state.notifications[0]
         self.assertEqual(kind, "findings")
+        self.assertEqual(details["report_path"], "/tmp/report.json")
         self.assertIn("CRITICAL", message)
         self.assertIn("badpkg@1.0.0", message)
         self.assertIn("/tmp/report.json", message)
 
     def test_notifier_posts_generic_webhook_payload(self):
         class DummyState:
-            def add_notification(self, project_path, kind, message, finding_fingerprint=None):
-                del project_path, kind, message, finding_fingerprint
+            def add_notification(self, project_path, kind, message, finding_fingerprint=None, details=None):
+                del project_path, kind, message, finding_fingerprint, details
 
         class DummyResponse:
             def __enter__(self):
@@ -459,6 +462,64 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(payload["event"], "orewatch.findings")
         self.assertIn("badpkg@1.0.0", payload["message"])
         self.assertEqual(payload["details"]["report_path"], "/tmp/report.json")
+
+    def test_package_update_advisory_state_and_notification_details(self):
+        with tempfile.TemporaryDirectory() as repo_root:
+            state = MonitorState(os.path.join(repo_root, "state.db"))
+            project_path = os.path.join(repo_root, "project")
+            os.makedirs(project_path)
+            manifest_path = os.path.join(project_path, "package-lock.json")
+            pathlib.Path(manifest_path).write_text("{}", encoding="utf-8")
+            advisory = {
+                "project_path": project_path,
+                "fingerprint": advisory_fingerprint(
+                    "npm",
+                    "lodash",
+                    "4.17.20",
+                    manifest_path,
+                    "lockfile",
+                ),
+                "ecosystem": "npm",
+                "package_name": "lodash",
+                "current_version": "4.17.20",
+                "latest_version": "4.17.21",
+                "manifest_path": manifest_path,
+                "source_type": "lockfile",
+                "registry_url": "https://registry.npmjs.org/lodash",
+                "package_url": "https://www.npmjs.com/package/lodash",
+                "update_command": "npm install lodash@4.17.21",
+                "details": {"project_name": "project"},
+            }
+
+            changes = state.upsert_package_update_advisories(project_path, [advisory])
+            self.assertEqual(len(changes["new_advisories"]), 1)
+            notifier = monitor_notifier.Notifier(
+                state,
+                {"notifications": {"desktop": False, "terminal": False}},
+            )
+            notifier.notify_package_updates(project_path, changes)
+
+            updates = state.list_package_update_advisories(project_path=project_path)
+            notifications = state.list_recent_notifications(project_path=project_path)
+            self.assertEqual(len(updates), 1)
+            self.assertEqual(updates[0]["package_name"], "lodash")
+            self.assertEqual(notifications[0]["kind"], "package_update_available")
+            self.assertEqual(
+                notifications[0]["details"]["package_updates"][0]["latest_version"],
+                "4.17.21",
+            )
+
+            kept = state.upsert_package_update_advisories(
+                project_path,
+                [],
+                resolve_missing=False,
+            )
+            self.assertEqual(kept["resolved_advisories"], [])
+            self.assertEqual(len(state.list_package_update_advisories(project_path=project_path)), 1)
+
+            resolved = state.upsert_package_update_advisories(project_path, [])
+            self.assertEqual(len(resolved["resolved_advisories"]), 1)
+            self.assertEqual(state.list_package_update_advisories(project_path=project_path), [])
 
     def test_generate_report_redacts_absolute_scanned_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -629,6 +690,47 @@ class MonitorTests(unittest.TestCase):
         self.assertIn(f"{orewatch_version_label()} monitor running", tooltip)
         self.assertIn("Watched projects: 3", tooltip)
         self.assertIn("Top finding: Malicious package badpkg@1.0.0", tooltip)
+
+    def test_menu_bar_tooltip_reflects_package_update_state(self):
+        snapshot = MenuBarSnapshot(
+            running=True,
+            api_listening=True,
+            active_findings=0,
+            highest_active_severity=None,
+            active_findings_preview=[],
+            recent_notifications=[
+                {
+                    "id": 12,
+                    "kind": "package_update_available",
+                    "message": "Package update available",
+                }
+            ],
+            monitor_home="/tmp/orewatch",
+            reports_dir="/tmp/orewatch/reports",
+            log_file="/tmp/orewatch/logs/monitor.log",
+            api_base_url="http://127.0.0.1:48736",
+            watch_count=3,
+            active_package_updates=2,
+            package_updates_preview=[
+                {
+                    "ecosystem": "npm",
+                    "package_name": "lodash",
+                    "current_version": "4.17.20",
+                    "latest_version": "4.17.21",
+                }
+            ],
+            package_update_check_status="success",
+        )
+
+        self.assertFalse(notification_requires_attention(snapshot.recent_notifications[0]))
+        self.assertEqual(build_menu_bar_title(snapshot), "OW U2")
+        snapshot.active_package_updates = 12
+        self.assertEqual(build_menu_bar_title(snapshot), "OW U9+")
+        snapshot.active_package_updates = 2
+        tooltip = build_menu_bar_tooltip(snapshot)
+        self.assertIn("Package updates: 2", tooltip)
+        self.assertIn("Package update check: success", tooltip)
+        self.assertIn("Top update: npm lodash 4.17.20 -> 4.17.21", tooltip)
 
     def test_orewatch_version_label_includes_current_version(self):
         self.assertRegex(orewatch_version_label(), r"^OreWatch v\d+\.\d+\.\d+$")
@@ -840,6 +942,38 @@ class MonitorTests(unittest.TestCase):
     def test_menu_bar_popup_title_matches_notification_kind(self):
         self.assertEqual(build_popup_title({"kind": "findings"}), "OreWatch security alert")
         self.assertEqual(build_popup_title({"kind": "resolved"}), "OreWatch resolved finding")
+        self.assertEqual(
+            build_popup_title({"kind": "package_update_available"}),
+            "OreWatch package update",
+        )
+
+    def test_self_update_command_detects_homebrew_without_homebrew_prefix_literal(self):
+        with patch(
+            "monitor.package_updates.shutil.which",
+            return_value="/srv/tools/bin/orewatch",
+        ):
+            with patch("monitor.package_updates.sys.executable", "/tmp/venv/bin/python"):
+                with patch(
+                    "monitor.package_updates.os.path.exists",
+                    side_effect=lambda path: path == "/srv/tools/Cellar/orewatch",
+                ):
+                    self.assertEqual(
+                        _self_update_command(),
+                        "brew update && brew reinstall rapticore/tap/orewatch",
+                    )
+
+    def test_self_update_command_does_not_treat_homebrew_python_as_homebrew_install(self):
+        python_path = "/opt/homebrew/Cellar/python@3.14/3.14/bin/python3.14"
+        with patch(
+            "monitor.package_updates.shutil.which",
+            return_value="/tmp/venv/bin/orewatch",
+        ):
+            with patch("monitor.package_updates.sys.executable", python_path):
+                with patch("monitor.package_updates.os.path.exists", return_value=False):
+                    command = _self_update_command()
+
+        self.assertIn("-m pip install --upgrade orewatch", command)
+        self.assertNotIn("brew reinstall", command)
 
     def test_menu_bar_uses_osascript_for_notification_center_popup(self):
         with patch("monitor.menubar.shutil.which", return_value="/usr/bin/osascript"):
@@ -1186,7 +1320,7 @@ class MonitorTests(unittest.TestCase):
 
         self.assertIn("python3.14 -m pip install 'orewatch[mac-menubar]'", message)
         self.assertIn("pipx inject orewatch pyobjc-framework-Cocoa", message)
-        self.assertIn("Homebrew", message)
+        self.assertIn("brew update && brew reinstall rapticore/tap/orewatch", message)
         self.assertIn("isolated libexec environment", message)
 
     def test_launch_menubar_app_detached_reuses_existing_process(self):
@@ -1717,6 +1851,137 @@ class MonitorTests(unittest.TestCase):
             self.assertIn("supported_ecosystems", health)
             stored = service.state.get_dependency_check(response["check_id"])
             self.assertEqual(stored["client_type"], "codex")
+
+    def test_package_update_check_records_project_and_self_advisories(self):
+        with tempfile.TemporaryDirectory() as repo_root:
+            project_path = os.path.join(repo_root, "project")
+            os.makedirs(project_path)
+            service = MonitorService(repo_root)
+            service.config["notifications"]["desktop"] = False
+            service.config["notifications"]["terminal"] = False
+            service.state.add_watched_project(project_path, {})
+            manifest_path = os.path.join(project_path, "package-lock.json")
+            pathlib.Path(manifest_path).write_text("{}", encoding="utf-8")
+            project_advisory = {
+                "project_path": project_path,
+                "fingerprint": advisory_fingerprint(
+                    "npm",
+                    "lodash",
+                    "4.17.20",
+                    manifest_path,
+                    "lockfile",
+                ),
+                "ecosystem": "npm",
+                "package_name": "lodash",
+                "current_version": "4.17.20",
+                "latest_version": "4.17.21",
+                "manifest_path": manifest_path,
+                "source_type": "lockfile",
+                "registry_url": "https://registry.npmjs.org/lodash",
+                "package_url": "https://www.npmjs.com/package/lodash",
+                "update_command": "npm install lodash@4.17.21",
+                "details": {"project_name": "project"},
+            }
+            self_advisory = {
+                "project_path": service.paths["home"],
+                "fingerprint": advisory_fingerprint(
+                    "orewatch",
+                    "orewatch",
+                    "1.2.5",
+                    "",
+                    "self",
+                ),
+                "ecosystem": "orewatch",
+                "package_name": "orewatch",
+                "current_version": "1.2.5",
+                "latest_version": "1.2.6",
+                "manifest_path": "",
+                "source_type": "self",
+                "registry_url": "https://pypi.org/pypi/orewatch/json",
+                "package_url": "https://pypi.org/project/orewatch/",
+                "update_command": "pipx upgrade orewatch",
+                "details": {"self_update": True},
+            }
+
+            with patch.object(
+                service.package_update_checker,
+                "check_project",
+                return_value={
+                    "project_path": project_path,
+                    "advisories": [project_advisory],
+                    "errors": [],
+                    "checked_packages": 1,
+                },
+            ):
+                with patch.object(
+                    service.package_update_checker,
+                    "check_self",
+                    return_value={
+                        "project_path": service.paths["home"],
+                        "advisories": [self_advisory],
+                        "errors": [],
+                        "checked_packages": 1,
+                    },
+                ):
+                    result = service.check_package_updates(force=True, reason="test")
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["active_updates"], 2)
+            updates = service.list_package_updates(limit=10)["updates"]
+            self.assertEqual(
+                {(update["ecosystem"], update["package_name"]) for update in updates},
+                {("npm", "lodash"), ("orewatch", "orewatch")},
+            )
+            notifications = service.list_recent_notifications(limit=5)["notifications"]
+            self.assertEqual(
+                {notification["kind"] for notification in notifications},
+                {"package_update_available"},
+            )
+
+    def test_package_update_check_clears_running_state_on_early_returns(self):
+        with tempfile.TemporaryDirectory() as repo_root:
+            service = MonitorService(repo_root)
+
+            service.state.set_agent_state("package_update_check_running", "true")
+            service.config["package_updates"]["enabled"] = False
+            disabled = service.check_package_updates(force=True, reason="test")
+            self.assertTrue(disabled["skipped"])
+            self.assertEqual(
+                service.state.get_agent_state("package_update_check_running"),
+                "false",
+            )
+            self.assertEqual(
+                service.state.get_agent_state("package_update_check_status"),
+                "skipped",
+            )
+
+            service.config["package_updates"]["enabled"] = True
+            service.state.set_agent_state("package_update_check_running", "true")
+            service.state.set_agent_state("last_package_update_check_at", "2999-01-01T00:00:00Z")
+            not_due = service.check_package_updates(force=False, reason="test")
+            self.assertTrue(not_due["skipped"])
+            self.assertEqual(
+                service.state.get_agent_state("package_update_check_running"),
+                "false",
+            )
+            self.assertEqual(
+                service.state.get_agent_state("package_update_check_status"),
+                "skipped",
+            )
+
+            service.state.set_agent_state("package_update_check_running", "true")
+            with patch("monitor.service._FileLock.acquire", return_value=False):
+                contended = service.check_package_updates(force=True, reason="test")
+            self.assertFalse(contended["success"])
+            self.assertTrue(contended["already_running"])
+            self.assertEqual(
+                service.state.get_agent_state("package_update_check_running"),
+                "false",
+            )
+            self.assertEqual(
+                service.state.get_agent_state("package_update_check_status"),
+                "contended",
+            )
 
     def test_local_threat_package_blocks_dependency_check_and_auto_retires(self):
         with tempfile.TemporaryDirectory() as repo_root:
@@ -2905,16 +3170,17 @@ class MonitorTests(unittest.TestCase):
 
             with patch.object(service.updater, "refresh_if_due", return_value={"success": True}):
                 with patch("monitor.service.run_scan", side_effect=[empty_result, fake_result]) as mocked_scan:
-                    with self.assertLogs("monitor.service", level="INFO"):
-                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    with patch.object(service, "check_package_updates_async") as _mocked_updates:
+                        with self.assertLogs("monitor.service", level="INFO"):
+                            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                                service.run_iteration()
+
+                            service.state.update_project_scan(project_dir, "full", None, 0, "primed")
+
+                            with open(package_json, "w", encoding="utf-8") as handle:
+                                handle.write('{"name": "demo", "dependencies": {"badpkg": "1.0.0"}}\n')
+
                             service.run_iteration()
-
-                        service.state.update_project_scan(project_dir, "full", None, 0, "primed")
-
-                        with open(package_json, "w", encoding="utf-8") as handle:
-                            handle.write('{"name": "demo", "dependencies": {"badpkg": "1.0.0"}}\n')
-
-                        service.run_iteration()
 
             self.assertEqual(mocked_scan.call_count, 2)
             active_findings = service.state.list_active_findings(project_dir)

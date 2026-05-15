@@ -57,8 +57,9 @@ from monitor.menubar import count_unacknowledged_alert_notifications
 from monitor.menubar import latest_attention_notification
 from monitor.menubar import notification_is_visible
 from monitor.notifier import Notifier
+from monitor.package_updates import PackageUpdateChecker
 from monitor.policy import build_tracked_findings, load_project_policy, severity_rank
-from monitor.scheduler import consume_ready_changes, determine_periodic_scan_kind, queue_change
+from monitor.scheduler import consume_ready_changes, determine_periodic_scan_kind, queue_change, should_run
 from monitor.snapshot_updater import SnapshotUpdater
 from monitor.state import MonitorState
 from monitor.watcher import detect_changes, take_project_snapshot
@@ -372,6 +373,10 @@ class MonitorService:
         self.state = MonitorState(self.paths["state_db"])
         self._migrate_legacy_instances_if_needed()
         self.notifier = Notifier(self.state, self.config, paths=self.paths)
+        package_update_config = self.config.get("package_updates", {}) or {}
+        self.package_update_checker = PackageUpdateChecker(
+            timeout_ms=int(package_update_config.get("registry_timeout_ms", 5000) or 5000)
+        )
         self.updater = SnapshotUpdater(
             self.code_root,
             self.paths["final_data_dir"],
@@ -694,6 +699,43 @@ class MonitorService:
             ],
         }
 
+    def _serialize_package_update_advisory(self, advisory: Dict[str, object]) -> Dict[str, object]:
+        """Return a client-facing representation of one package update advisory."""
+        project_path = str(advisory.get("project_path", "") or "")
+        return {
+            **advisory,
+            "project_name": os.path.basename(project_path) or project_path,
+        }
+
+    def list_package_updates(
+        self,
+        project_path: Optional[str] = None,
+        limit: int = 20,
+        active_only: bool = True,
+    ) -> Dict[str, object]:
+        """Return package update advisories for CLI, API, MCP, and menu bar clients."""
+        normalized_project = (
+            os.path.realpath(os.path.abspath(project_path))
+            if project_path
+            else None
+        )
+        updates = self.state.list_package_update_advisories(
+            project_path=normalized_project,
+            active_only=active_only,
+            limit=max(int(limit), 1),
+        )
+        return {
+            "project_path": normalized_project,
+            "count": len(updates),
+            "returned": len(updates),
+            "limit": max(int(limit), 1),
+            "active_only": bool(active_only),
+            "updates": [
+                self._serialize_package_update_advisory(advisory)
+                for advisory in updates
+            ],
+        }
+
     def list_local_threat_packages(
         self,
         active_only: bool = True,
@@ -997,6 +1039,209 @@ class MonitorService:
             "backups_pruned": pruned_counts,
             "staging_entries_removed": staging_removed,
             "bytes_freed": bytes_freed,
+        }
+
+    def _package_update_config(self) -> Dict[str, object]:
+        return self.config.get("package_updates", {}) or {}
+
+    def _package_update_lock_path(self) -> str:
+        return os.path.join(self.paths["home"], "package-updates.lock")
+
+    def _set_package_update_runtime_state(
+        self,
+        running: bool,
+        status: str = "",
+        message: str = "",
+        reason: str = "",
+    ) -> None:
+        self.state.set_agent_state("package_update_check_running", "true" if running else "false")
+        if running:
+            self.state.set_agent_state("package_update_check_started_at", _utcnow())
+            self.state.set_agent_state("package_update_check_reason", reason)
+        else:
+            self.state.set_agent_state("package_update_check_finished_at", _utcnow())
+            if status not in {"skipped", "contended"}:
+                self.state.set_agent_state("last_package_update_check_at", _utcnow())
+        if status:
+            self.state.set_agent_state("package_update_check_status", status)
+        if message:
+            self.state.set_agent_state("package_update_check_message", message)
+
+    def _package_update_check_due(self, force: bool) -> bool:
+        if force:
+            return True
+        config = self._package_update_config()
+        interval_seconds = int(config.get("interval_seconds", 24 * 60 * 60) or 24 * 60 * 60)
+        return should_run(
+            self.state.get_agent_state("last_package_update_check_at"),
+            interval_seconds,
+        )
+
+    def check_package_updates(
+        self,
+        project_path: Optional[str] = None,
+        force: bool = True,
+        reason: str = "manual",
+    ) -> Dict[str, object]:
+        """Run package update advisory checks now."""
+        config = self._package_update_config()
+        if not bool(config.get("enabled", True)):
+            message = "Package update checks are disabled"
+            self._set_package_update_runtime_state(
+                False,
+                status="skipped",
+                message=message,
+                reason=reason,
+            )
+            return {
+                "success": True,
+                "skipped": True,
+                "message": message,
+            }
+        if not self._package_update_check_due(force):
+            message = "Package update check is not due"
+            self._set_package_update_runtime_state(
+                False,
+                status="skipped",
+                message=message,
+                reason=reason,
+            )
+            return {
+                "success": True,
+                "skipped": True,
+                "message": message,
+            }
+
+        lock = _FileLock(self._package_update_lock_path(), "package update check lock")
+        if not lock.acquire():
+            message = "Package update check is already running"
+            self._set_package_update_runtime_state(
+                False,
+                status="contended",
+                message=message,
+                reason=reason,
+            )
+            return {
+                "success": False,
+                "already_running": True,
+                "message": message,
+            }
+
+        self._set_package_update_runtime_state(True, status="running", reason=reason)
+        checked_projects = 0
+        checked_packages = 0
+        errors: List[Dict[str, str]] = []
+        try:
+            if project_path:
+                normalized_project = os.path.realpath(os.path.abspath(project_path))
+                if not os.path.isdir(normalized_project):
+                    raise FileNotFoundError(normalized_project)
+                projects = [{"path": normalized_project}]
+            else:
+                projects = self.state.list_watched_projects()
+
+            for project in projects:
+                project_result = self.package_update_checker.check_project(str(project["path"]))
+                checked_projects += 1
+                checked_packages += int(project_result.get("checked_packages", 0) or 0)
+                project_errors = list(project_result.get("errors", []))
+                errors.extend(project_errors)
+                changes = self.state.upsert_package_update_advisories(
+                    str(project_result["project_path"]),
+                    list(project_result.get("advisories", [])),
+                    resolve_missing=not project_errors,
+                )
+                self.notifier.notify_package_updates(
+                    str(project_result["project_path"]),
+                    changes,
+                )
+
+            if bool(config.get("include_self", True)):
+                self_result = self.package_update_checker.check_self(self.paths["home"])
+                checked_packages += int(self_result.get("checked_packages", 0) or 0)
+                self_errors = list(self_result.get("errors", []))
+                errors.extend(self_errors)
+                changes = self.state.upsert_package_update_advisories(
+                    str(self_result["project_path"]),
+                    list(self_result.get("advisories", [])),
+                    resolve_missing=not self_errors,
+                )
+                self.notifier.notify_package_updates(str(self_result["project_path"]), changes)
+
+            active_updates = self.list_package_updates(limit=1000)["count"]
+            status = "success" if not errors else "warning"
+            message = (
+                f"Package update check completed: {active_updates} active update(s)"
+                + (f"; {len(errors)} lookup error(s)" if errors else "")
+            )
+            self._set_package_update_runtime_state(
+                False,
+                status=status,
+                message=message,
+                reason=reason,
+            )
+            return {
+                "success": True,
+                "status": status,
+                "checked_projects": checked_projects,
+                "checked_packages": checked_packages,
+                "active_updates": active_updates,
+                "errors": errors,
+                "message": message,
+            }
+        except Exception as exc:
+            self._set_package_update_runtime_state(
+                False,
+                status="failed",
+                message=str(exc),
+                reason=reason,
+            )
+            raise
+        finally:
+            lock.release()
+
+    def check_package_updates_async(
+        self,
+        project_path: Optional[str] = None,
+        force: bool = True,
+        reason: str = "manual",
+    ) -> Dict[str, object]:
+        """Start a package update advisory check in this monitor process."""
+        if self.state.get_agent_state("package_update_check_running") == "true":
+            return {
+                "success": False,
+                "already_running": True,
+                "message": "Package update check is already running",
+            }
+        if not self._package_update_check_due(force):
+            return {
+                "success": True,
+                "skipped": True,
+                "message": "Package update check is not due",
+            }
+
+        self._set_package_update_runtime_state(True, status="queued", reason=reason)
+
+        def runner() -> None:
+            try:
+                self.check_package_updates(
+                    project_path=project_path,
+                    force=force,
+                    reason=reason,
+                )
+            except Exception:
+                self.logger.exception("Package update check failed")
+
+        thread = threading.Thread(
+            target=runner,
+            name="orewatch-package-updates",
+            daemon=True,
+        )
+        thread.start()
+        return {
+            "success": True,
+            "started": True,
+            "message": "Package update check started",
         }
 
     def _refresh_lock_path(self) -> str:
@@ -1416,7 +1661,13 @@ class MonitorService:
             "database_statuses": threat_data["database_statuses"],
             "final_data_dir": self.updater.final_data_dir,
             "active_findings": status.get("active_findings", 0),
+            "active_package_updates": status.get("active_package_updates", 0),
             "highest_active_severity": status.get("highest_active_severity"),
+            "package_update_check_running": status.get("package_update_check_running"),
+            "package_update_check_status": status.get("package_update_check_status"),
+            "package_update_check_message": status.get("package_update_check_message"),
+            "last_package_update_check_at": status.get("last_package_update_check_at"),
+            "package_updates_preview": status.get("package_updates_preview", []),
             "recent_notifications": status.get("recent_notifications", []),
         }
         return payload
@@ -2021,6 +2272,7 @@ class MonitorService:
         effective_manager = installed_manager or self._detect_available_service_manager(configured_manager)
         summary = self.state.get_summary()
         active_findings = self.list_active_findings(limit=3)
+        package_updates = self.list_package_updates(limit=5)
         recent_notifications = self.list_recent_notifications(limit=20)
         menubar_status = self._menubar_status()
         legacy_launchd_agents = self._legacy_launchd_agents()
@@ -2070,9 +2322,18 @@ class MonitorService:
             "current_snapshot_key_id": self.state.get_agent_state("current_snapshot_key_id"),
             "current_live_dataset_version": self.state.get_agent_state("current_live_dataset_version"),
             "active_findings": summary.get("active_findings", 0),
+            "active_package_updates": summary.get("active_package_updates", 0),
             "highest_active_severity": summary.get("highest_active_severity"),
             "active_findings_preview": active_findings["findings"],
+            "package_updates_preview": package_updates["updates"],
             "recent_notifications": visible_recent_notifications,
+            "last_package_update_check_at": self.state.get_agent_state("last_package_update_check_at"),
+            "package_update_check_running": self.state.get_agent_state("package_update_check_running") == "true",
+            "package_update_check_started_at": self.state.get_agent_state("package_update_check_started_at"),
+            "package_update_check_finished_at": self.state.get_agent_state("package_update_check_finished_at"),
+            "package_update_check_status": self.state.get_agent_state("package_update_check_status"),
+            "package_update_check_message": self.state.get_agent_state("package_update_check_message"),
+            "package_update_check_reason": self.state.get_agent_state("package_update_check_reason"),
             "menubar_last_launch_at": self.state.get_agent_state("menubar_last_launch_at"),
             "menubar_last_launch_status": self.state.get_agent_state("menubar_last_launch_status"),
             "menubar_last_launch_message": self.state.get_agent_state("menubar_last_launch_message"),
@@ -2419,6 +2680,8 @@ class MonitorService:
             scan_kind = determine_periodic_scan_kind(project, policy)
             if scan_kind:
                 self._run_project_scan(project, scan_kind, "scheduled")
+
+        self.check_package_updates_async(force=False, reason="scheduled")
 
     def _poll_project(self, project: Dict) -> None:
         """Poll one project for file changes."""
