@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.3.0 - 2026-05-15
+
+- Added a first-class package update advisory surface across the monitor: best-effort latest-version lookups for npm, PyPI, Maven Central, RubyGems, Go module proxy, and crates.io, plus an OreWatch self-update detector that recognizes pipx, pip, and Homebrew installs (including custom Homebrew prefixes via formula sibling-path checks).
+- Added durable advisory storage in a new `package_update_advisories` SQLite table with new/updated/resolved deltas, so update suggestions persist across monitor restarts and can be reviewed later.
+- Exposed advisories across all monitor surfaces: `orewatch monitor package-updates [--check] [--project] [--limit] [--all] [--json]`, `GET /v1/package-updates`, `POST /v1/package-updates/check`, and the new MCP tools `orewatch_list_package_updates` and `orewatch_check_package_updates`.
+- Wired daily scheduled and manual update checks into the singleton monitor with file-lock serialization, structured runtime state (`running`/`queued`/`success`/`warning`/`skipped`/`contended`/`failed`), and clean state reset on every early-return path so the menu bar never gets stuck in a phantom "running" status.
+- Upgraded the macOS menu bar with a dedicated Package Updates section: count badge (`OW U2`, capped at `OW U9+`), last-check status, self-update indication, per-project update entries with reveal-manifest, copyable suggested commands, and a manual "Check for Package Updates" action.
+- Reinforced the notify-only contract: OreWatch surfaces newer versions and copy-ready commands but never mutates manifests, lockfiles, or installed packages.
+- Updated Homebrew install guidance across README and docs: the formula now ships PyObjC for `monitor menubar`, with `brew update && brew reinstall rapticore/tap/orewatch` as the recovery path for older installs missing `AppKit`.
+- Verified the release with `python3.14 -m py_compile monitor/*.py`, `python3.14 -m pytest tests/test_monitor.py -q` (112 passed), `python3.14 -m pytest -q` (189 passed, 82 subtests passed), `python3.14 -m build`, and `python3.14 -m twine check`.
+
 ## 1.2.5 - 2026-05-11
 
 - Added a manual threat-intelligence refresh path across CLI, local API, and the macOS menu bar so users can request an immediate update outside the scheduled cadence.
