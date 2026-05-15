@@ -82,9 +82,9 @@ def _pyobjc_install_error_message() -> str:
         "environment as the `orewatch` command: "
         f"`python3.14 -m pip install '{MAC_MENUBAR_EXTRA}'` or "
         f"`pipx inject orewatch {MAC_MENUBAR_OPTIONAL_DEPENDENCY}`. "
-        "If `orewatch` was installed with Homebrew, reinstall it with pipx or pip "
-        "using the `mac-menubar` extra; a separate `pip install` will not update "
-        "Homebrew's isolated libexec environment."
+        "If `orewatch` was installed with Homebrew, run "
+        "`brew update && brew reinstall rapticore/tap/orewatch`; a separate "
+        "`pip install` will not update Homebrew's isolated libexec environment."
     )
 
 
@@ -104,11 +104,17 @@ class MenuBarSnapshot:
     api_base_url: str
     watch_count: int
     local_threat_packages: List[Dict[str, Any]] = field(default_factory=list)
+    active_package_updates: int = 0
+    package_updates_preview: List[Dict[str, Any]] = field(default_factory=list)
     last_live_promotion_at: str = ""
     last_live_promotion_status: str = ""
     threat_refresh_running: bool = False
     threat_refresh_status: str = ""
     threat_refresh_message: str = ""
+    package_update_check_running: bool = False
+    package_update_check_status: str = ""
+    package_update_check_message: str = ""
+    last_package_update_check_at: str = ""
     last_action_message: str = ""
 
 
@@ -454,6 +460,31 @@ def finding_dependency_path_label(finding: Dict[str, Any]) -> str:
     return manifest_path
 
 
+def package_update_primary_label(update: Dict[str, Any]) -> str:
+    """Render the first line for a package-update menu entry."""
+    name = str(update.get("package_name", "") or "").strip()
+    current = str(update.get("current_version", "") or "").strip()
+    latest = str(update.get("latest_version", "") or "").strip()
+    ecosystem = str(update.get("ecosystem", "") or "").strip()
+    if ecosystem == "orewatch":
+        return f"OreWatch {current} -> {latest}"
+    prefix = f"{ecosystem} " if ecosystem else ""
+    return f"{prefix}{name} {current} -> {latest}".strip()
+
+
+def package_update_path_label(update: Dict[str, Any]) -> str:
+    """Return the manifest path label for a package update when available."""
+    return str(update.get("manifest_path", "") or "").strip()
+
+
+def self_update_advisory(updates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return the OreWatch self-update advisory from a package update list."""
+    for update in updates:
+        if str(update.get("ecosystem", "") or "") == "orewatch":
+            return update
+    return None
+
+
 def latest_alert_target_path(
     snapshot: MenuBarSnapshot,
     notification: Dict[str, Any],
@@ -481,6 +512,9 @@ def build_menu_bar_title(
         return "OW!"
     if snapshot.active_findings > 0:
         return f"OW!{snapshot.active_findings}"
+    if snapshot.active_package_updates > 0:
+        update_count = int(snapshot.active_package_updates)
+        return f"OW U{'9+' if update_count > 9 else update_count}"
     if snapshot.running or snapshot.api_listening:
         return "OW"
     return "OW?"
@@ -529,6 +563,7 @@ def build_menu_bar_tooltip(
         f"{orewatch_version_label()} monitor {status}",
         f"Watched projects: {snapshot.watch_count}",
         f"Active findings: {snapshot.active_findings}",
+        f"Package updates: {snapshot.active_package_updates}",
     ]
     newest_alert = latest_attention_notification(
         snapshot.recent_notifications,
@@ -541,6 +576,14 @@ def build_menu_bar_tooltip(
         lines.append(f"Latest alert: {_truncate(str(newest_alert.get('message', '')))}")
     if snapshot.highest_active_severity:
         lines.append(f"Highest severity: {snapshot.highest_active_severity}")
+    if snapshot.package_update_check_running:
+        lines.append("Package update check: running")
+    elif snapshot.package_update_check_status:
+        lines.append(f"Package update check: {snapshot.package_update_check_status}")
+    if snapshot.active_package_updates > 0 and snapshot.package_updates_preview:
+        lines.append(
+            f"Top update: {_truncate(package_update_primary_label(snapshot.package_updates_preview[0]))}"
+        )
     if attention_alert_count > 0 and newest_alert is not None:
         pass
     elif snapshot.active_findings_preview:
@@ -567,6 +610,8 @@ def build_popup_title(notification: Dict[str, Any]) -> str:
         return "OreWatch security alert"
     if kind == "live_update_anomaly":
         return "OreWatch threat data alert"
+    if kind == "package_update_available":
+        return "OreWatch package update"
     return "OreWatch notification"
 
 
@@ -622,6 +667,7 @@ def collect_menu_bar_snapshot(
     status = service.get_status()
     findings = service.list_active_findings(limit=findings_limit)
     notifications = service.list_recent_notifications(limit=notifications_limit)
+    package_updates = service.list_package_updates(limit=8)
     watch_summary = status.get("watch_summary", {}) or {}
     local_threat = service.list_local_threat_packages(active_only=True)
     return MenuBarSnapshot(
@@ -638,11 +684,17 @@ def collect_menu_bar_snapshot(
         api_base_url=str(status.get("api_base_url") or service.get_connection_info()["base_url"]),
         watch_count=int(watch_summary.get("watched_projects", 0) or 0),
         local_threat_packages=list(local_threat.get("packages", [])),
+        active_package_updates=int(status.get("active_package_updates", package_updates.get("count", 0)) or 0),
+        package_updates_preview=list(package_updates.get("updates", [])),
         last_live_promotion_at=str(status.get("last_live_promotion_at") or ""),
         last_live_promotion_status=str(status.get("last_live_promotion_status") or ""),
         threat_refresh_running=bool(status.get("threat_refresh_running")),
         threat_refresh_status=str(status.get("threat_refresh_status") or ""),
         threat_refresh_message=str(status.get("threat_refresh_message") or ""),
+        package_update_check_running=bool(status.get("package_update_check_running")),
+        package_update_check_status=str(status.get("package_update_check_status") or ""),
+        package_update_check_message=str(status.get("package_update_check_message") or ""),
+        last_package_update_check_at=str(status.get("last_package_update_check_at") or ""),
         last_action_message=last_action_message,
     )
 
@@ -1185,6 +1237,81 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
                 )
 
             self.menu.addItem_(AppKit.NSMenuItem.separatorItem())
+            self.menu.addItem_(self._make_item("Package Updates", enabled=False))
+            update_status = "Checking" if snapshot.package_update_check_running else (
+                snapshot.package_update_check_status or "Idle"
+            )
+            self.menu.addItem_(
+                self._make_item(
+                    f"Available: {snapshot.active_package_updates} | Status: {update_status}",
+                    enabled=False,
+                )
+            )
+            if snapshot.last_package_update_check_at:
+                self.menu.addItem_(
+                    self._make_item(
+                        _truncate(
+                            f"Last check: {snapshot.last_package_update_check_at}",
+                            90,
+                        ),
+                        enabled=False,
+                    )
+                )
+            current_self_update = self_update_advisory(snapshot.package_updates_preview)
+            if current_self_update is not None:
+                self.menu.addItem_(
+                    self._make_item(
+                        _truncate(package_update_primary_label(current_self_update), 90),
+                        enabled=False,
+                    )
+                )
+                command = str(current_self_update.get("update_command", "") or "")
+                if command:
+                    self.menu.addItem_(
+                        self._make_item(
+                            "Copy OreWatch Update Command",
+                            _selector("copyPackageUpdateCommand_"),
+                            {"text": command},
+                            enabled=True,
+                        )
+                    )
+            project_updates = [
+                update
+                for update in snapshot.package_updates_preview
+                if str(update.get("ecosystem", "") or "") != "orewatch"
+            ]
+            if project_updates:
+                for update in project_updates[:5]:
+                    manifest_path = package_update_path_label(update)
+                    self.menu.addItem_(
+                        self._make_item(
+                            _truncate(package_update_primary_label(update), 90),
+                            _selector("openFinding_"),
+                            {"path": manifest_path},
+                            enabled=bool(manifest_path),
+                        )
+                    )
+                    command = str(update.get("update_command", "") or "")
+                    if command:
+                        self.menu.addItem_(
+                            self._make_item(
+                                "Copy Update Command",
+                                _selector("copyPackageUpdateCommand_"),
+                                {"text": command},
+                                enabled=True,
+                            )
+                        )
+            elif current_self_update is None:
+                self.menu.addItem_(self._make_item("No package updates available", enabled=False))
+            self.menu.addItem_(
+                self._make_item(
+                    "Check for Package Updates",
+                    _selector("checkPackageUpdates_"),
+                    enabled=not snapshot.package_update_check_running,
+                )
+            )
+
+            self.menu.addItem_(AppKit.NSMenuItem.separatorItem())
             if snapshot.recent_notifications:
                 self.menu.addItem_(self._make_item("Recent notifications", enabled=False))
                 for notification in snapshot.recent_notifications[:5]:
@@ -1335,6 +1462,15 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
             self.last_action_message = "Copied dependency path"
             self.refresh_(None)
 
+        def copyPackageUpdateCommand_(self, sender):
+            payload = self._menu_payload(sender)
+            text = str(payload.get("text", "") or "")
+            if not text:
+                return
+            self._copy_text(text)
+            self.last_action_message = "Copied update command"
+            self.refresh_(None)
+
         def openReportsFolder_(self, _sender):
             self._open_path(self.service.paths["reports"])
 
@@ -1407,6 +1543,12 @@ def run_menubar_app(service, refresh_seconds: float = 15.0) -> int:
             self._start_async_action(
                 "Updating threat intelligence...",
                 lambda: self.service.refresh_threat_data(force=True, reason="menubar"),
+            )
+
+        def checkPackageUpdates_(self, _sender):
+            self._start_async_action(
+                "Checking package updates...",
+                lambda: self.service.check_package_updates(force=True, reason="menubar"),
             )
 
         def markAlertsReviewed_(self, _sender):

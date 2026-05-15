@@ -123,6 +123,7 @@ class MonitorState:
                     finding_fingerprint TEXT,
                     kind TEXT NOT NULL,
                     message TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL
                 );
 
@@ -186,11 +187,45 @@ class MonitorState:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_local_threat_packages_active
                 ON local_threat_packages(ecosystem, name_normalized)
                 WHERE active = 1;
+
+                CREATE TABLE IF NOT EXISTS package_update_advisories (
+                    project_path TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    ecosystem TEXT NOT NULL,
+                    package_name TEXT NOT NULL,
+                    current_version TEXT NOT NULL,
+                    latest_version TEXT NOT NULL,
+                    manifest_path TEXT NOT NULL DEFAULT '',
+                    source_type TEXT NOT NULL DEFAULT '',
+                    registry_url TEXT NOT NULL DEFAULT '',
+                    package_url TEXT NOT NULL DEFAULT '',
+                    update_command TEXT NOT NULL DEFAULT '',
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    active INTEGER NOT NULL DEFAULT 1,
+                    first_seen_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    PRIMARY KEY (project_path, fingerprint)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_package_update_advisories_active
+                ON package_update_advisories(active, project_path);
                 """
             )
+            self._migrate_notifications(conn)
             self._migrate_findings_primary_key(conn)
             self._migrate_local_threat_packages(conn)
         self._secure_state_db()
+
+    def _migrate_notifications(self, conn: sqlite3.Connection) -> None:
+        """Add notification columns introduced after the initial table."""
+        rows = conn.execute("PRAGMA table_info(notifications)").fetchall()
+        existing_columns = {row["name"] for row in rows}
+        if "details_json" not in existing_columns:
+            conn.execute(
+                "ALTER TABLE notifications "
+                "ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def _migrate_local_threat_packages(self, conn: sqlite3.Connection) -> None:
         """Add local-threat columns introduced after the initial table."""
@@ -705,6 +740,7 @@ class MonitorState:
         kind: str,
         message: str,
         finding_fingerprint: Optional[str] = None,
+        details: Optional[Dict] = None,
     ) -> None:
         """Record a notification event."""
         normalized_path = _normalize_project_path(project_path)
@@ -712,14 +748,15 @@ class MonitorState:
             conn.execute(
                 """
                 INSERT INTO notifications (
-                    project_path, finding_fingerprint, kind, message, created_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    project_path, finding_fingerprint, kind, message, details_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     normalized_path,
                     finding_fingerprint,
                     kind,
                     message,
+                    json.dumps(details or {}, sort_keys=True),
                     utcnow(),
                 ),
             )
@@ -744,7 +781,161 @@ class MonitorState:
         params.append(max(int(limit), 1))
         with self._connect() as conn:
             rows = conn.execute(query, tuple(params)).fetchall()
-        return [dict(row) for row in rows]
+        notifications = []
+        for row in rows:
+            notification = dict(row)
+            try:
+                details = json.loads(notification.pop("details_json", "{}") or "{}")
+            except json.JSONDecodeError:
+                details = {}
+            notification["details"] = details
+            notifications.append(notification)
+        return notifications
+
+    def _deserialize_package_update_advisory(self, row: sqlite3.Row | Dict) -> Dict:
+        """Return one package-update advisory row with parsed details."""
+        advisory = dict(row)
+        try:
+            details = json.loads(advisory.pop("details_json", "{}") or "{}")
+        except json.JSONDecodeError:
+            details = {}
+        advisory["details"] = details
+        return advisory
+
+    def upsert_package_update_advisories(
+        self,
+        project_path: str,
+        advisories: List[Dict],
+        resolve_missing: bool = True,
+    ) -> Dict[str, List[Dict]]:
+        """Upsert package update advisories and return new/updated/resolved deltas."""
+        normalized_path = _normalize_project_path(project_path)
+        now = utcnow()
+        incoming = {str(advisory["fingerprint"]): dict(advisory) for advisory in advisories}
+        new_advisories: List[Dict] = []
+        updated_advisories: List[Dict] = []
+        resolved_advisories: List[Dict] = []
+
+        with self._connect() as conn:
+            current_rows = conn.execute(
+                """
+                SELECT * FROM package_update_advisories
+                WHERE project_path = ?
+                """,
+                (normalized_path,),
+            ).fetchall()
+            current = {row["fingerprint"]: dict(row) for row in current_rows}
+            active_current = {
+                row["fingerprint"]: dict(row)
+                for row in current_rows
+                if int(row["active"] or 0) == 1
+            }
+
+            for fingerprint, advisory in incoming.items():
+                details_json = json.dumps(advisory.get("details", {}) or {}, sort_keys=True)
+                row = current.get(fingerprint)
+                params = (
+                    normalized_path,
+                    fingerprint,
+                    str(advisory.get("ecosystem", "")),
+                    str(advisory.get("package_name", "")),
+                    str(advisory.get("current_version", "")),
+                    str(advisory.get("latest_version", "")),
+                    str(advisory.get("manifest_path", "")),
+                    str(advisory.get("source_type", "")),
+                    str(advisory.get("registry_url", "")),
+                    str(advisory.get("package_url", "")),
+                    str(advisory.get("update_command", "")),
+                    details_json,
+                    now,
+                    now,
+                )
+                conn.execute(
+                    """
+                    INSERT INTO package_update_advisories (
+                        project_path, fingerprint, ecosystem, package_name,
+                        current_version, latest_version, manifest_path, source_type,
+                        registry_url, package_url, update_command, details_json,
+                        active, first_seen_at, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    ON CONFLICT(project_path, fingerprint) DO UPDATE SET
+                        ecosystem = excluded.ecosystem,
+                        package_name = excluded.package_name,
+                        current_version = excluded.current_version,
+                        latest_version = excluded.latest_version,
+                        manifest_path = excluded.manifest_path,
+                        source_type = excluded.source_type,
+                        registry_url = excluded.registry_url,
+                        package_url = excluded.package_url,
+                        update_command = excluded.update_command,
+                        details_json = excluded.details_json,
+                        active = 1,
+                        last_seen_at = excluded.last_seen_at,
+                        resolved_at = NULL
+                    """,
+                    params,
+                )
+                saved = conn.execute(
+                    """
+                    SELECT * FROM package_update_advisories
+                    WHERE project_path = ? AND fingerprint = ?
+                    """,
+                    (normalized_path, fingerprint),
+                ).fetchone()
+                serialized = self._deserialize_package_update_advisory(saved)
+                if row is None or int(row.get("active", 0) or 0) == 0:
+                    new_advisories.append(serialized)
+                elif str(row.get("latest_version", "")) != str(advisory.get("latest_version", "")):
+                    updated_advisories.append(serialized)
+
+            if resolve_missing:
+                for fingerprint, row in active_current.items():
+                    if fingerprint in incoming:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE package_update_advisories
+                        SET active = 0, resolved_at = ?, last_seen_at = ?
+                        WHERE project_path = ? AND fingerprint = ?
+                        """,
+                        (now, now, normalized_path, fingerprint),
+                    )
+                    updated = dict(row)
+                    updated["active"] = 0
+                    updated["resolved_at"] = now
+                    updated["last_seen_at"] = now
+                    resolved_advisories.append(self._deserialize_package_update_advisory(updated))
+
+        return {
+            "new_advisories": new_advisories,
+            "updated_advisories": updated_advisories,
+            "resolved_advisories": resolved_advisories,
+        }
+
+    def list_package_update_advisories(
+        self,
+        project_path: Optional[str] = None,
+        active_only: bool = True,
+        limit: Optional[int] = None,
+    ) -> List[Dict]:
+        """Return package update advisories."""
+        query = "SELECT * FROM package_update_advisories"
+        clauses: List[str] = []
+        params: List[object] = []
+        if active_only:
+            clauses.append("active = 1")
+        if project_path:
+            clauses.append("project_path = ?")
+            params.append(_normalize_project_path(project_path))
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY project_path ASC, ecosystem ASC, package_name ASC, current_version ASC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(int(limit), 1))
+        with self._connect() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+        return [self._deserialize_package_update_advisory(row) for row in rows]
 
     def list_active_findings(
         self,
@@ -786,6 +977,9 @@ class MonitorState:
             active_findings = conn.execute(
                 "SELECT COUNT(*) AS count FROM findings WHERE active = 1"
             ).fetchone()["count"]
+            active_package_updates = conn.execute(
+                "SELECT COUNT(*) AS count FROM package_update_advisories WHERE active = 1"
+            ).fetchone()["count"]
             notifications = conn.execute(
                 "SELECT COUNT(*) AS count FROM notifications"
             ).fetchone()["count"]
@@ -808,6 +1002,7 @@ class MonitorState:
         return {
             "watched_projects": watched,
             "active_findings": active_findings,
+            "active_package_updates": active_package_updates,
             "highest_active_severity": highest_active["severity"] if highest_active else None,
             "notifications": notifications,
             "dependency_checks": dependency_checks,

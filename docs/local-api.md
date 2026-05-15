@@ -127,7 +127,44 @@ Each notification includes:
 - `project_name`
 - `kind`
 - `message`
+- `details`
 - `created_at`
+
+### `GET /v1/package-updates`
+
+Returns package update advisories for watched project dependencies and OreWatch
+self-update checks.
+
+Supported query params:
+
+- `project_path`
+- `limit`
+- `active_only`
+
+Each update includes:
+
+- `ecosystem`
+- `package_name`
+- `current_version`
+- `latest_version`
+- `manifest_path`
+- `source_type`
+- `update_command`
+
+### `POST /v1/package-updates/check`
+
+Starts a best-effort package update advisory check. This does not update
+manifests or install packages.
+
+Request:
+
+```json
+{
+  "project_path": "/path/to/project",
+  "force": true,
+  "wait": false
+}
+```
 
 ### `POST /v1/threat-data/refresh`
 
@@ -341,6 +378,8 @@ The bridge exposes:
 - `orewatch_override_dependency_add`
 - `orewatch_list_active_findings`
 - `orewatch_list_notifications`
+- `orewatch_list_package_updates`
+- `orewatch_check_package_updates`
 
 This allows MCP clients to retrieve background detections and recent alert messages after the original scan has completed.
 
@@ -392,7 +431,7 @@ Common API integration pattern:
 4. Call `POST /v1/check/manifest` when a supported manifest is saved or explicitly rechecked.
 5. Call `POST /v1/threat-data/refresh` when the user explicitly requests current threat intelligence.
 6. Use `POST /v1/local-threat/packages` for customer-local package names that should be detected before official TI updates.
-7. Poll `GET /v1/findings/active` and `GET /v1/notifications` for durable background-monitor alerts.
+7. Poll `GET /v1/findings/active`, `GET /v1/notifications`, and `GET /v1/package-updates` for durable background-monitor alerts and update advisories.
 
 Xcode caveat:
 
@@ -408,16 +447,21 @@ OreWatch background detections are intentionally available through multiple surf
 - CLI:
   - `orewatch monitor findings`
   - `orewatch monitor notifications`
+  - `orewatch monitor package-updates`
   - `orewatch monitor refresh-threat-data`
   - `orewatch monitor local-threat add|list|remove`
 - Local API:
   - `GET /v1/findings/active`
   - `GET /v1/notifications`
+  - `GET /v1/package-updates`
+  - `POST /v1/package-updates/check`
   - `POST /v1/threat-data/refresh`
   - `GET|POST /v1/local-threat/packages`
 - MCP:
   - `orewatch_list_active_findings`
   - `orewatch_list_notifications`
+  - `orewatch_list_package_updates`
+  - `orewatch_check_package_updates`
 
 Desktop and terminal notifications are still best-effort local alert channels, but the supported durable review path is the stored findings/notifications surface above.
 
@@ -430,14 +474,19 @@ python3.14 -m pip install 'orewatch[mac-menubar]'
 
 # existing pipx install
 pipx inject orewatch pyobjc-framework-Cocoa
+
+# Homebrew install
+brew install rapticore/tap/orewatch
 orewatch monitor menubar
 ```
 
 `orewatch monitor menubar` relaunches the app in the background by default and returns the terminal immediately. Use `orewatch monitor menubar --foreground` only for debugging.
 
-If you installed OreWatch with Homebrew and want the menu bar app, reinstall it
-with `pipx` or `pip` using `orewatch[mac-menubar]` so the optional Cocoa
-bindings live in the same environment as `orewatch`.
+Homebrew installs the Cocoa bindings into OreWatch's isolated `libexec`
+environment. If an older install reports `No module named 'AppKit'`, run
+`brew update && brew reinstall rapticore/tap/orewatch`. For pip, pipx, and
+source installs, the optional bindings still need to be added to the same
+Python environment that provides `orewatch`.
 
 The menu bar app uses the same singleton monitor and findings store. It is an additional native review surface, not a second daemon.
 

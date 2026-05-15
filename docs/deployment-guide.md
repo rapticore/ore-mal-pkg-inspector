@@ -106,7 +106,17 @@ Once the PyPI sdist is live:
 2. Update `Formula/orewatch.rb` with:
    - the published PyPI sdist URL
    - the source tarball SHA256 from the local build
+   - all required Python resources, including `pyobjc-core` and
+     `pyobjc-framework-Cocoa` so the Homebrew install supports
+     `orewatch monitor menubar`
 3. Commit and push the formula update.
+
+Homebrew installs Python applications into an isolated `libexec` virtualenv, so
+do not rely on users adding PyObjC with `pip` after installation. The formula
+must carry the Cocoa resources directly. If `brew update-python-resources`
+cannot resolve the just-published `orewatch` version because of its upload-time
+cutoff, manually preserve or refresh the PyObjC resource stanzas before
+committing the tap update.
 
 Example:
 
